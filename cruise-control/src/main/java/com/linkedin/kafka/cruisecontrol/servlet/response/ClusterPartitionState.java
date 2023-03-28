@@ -112,24 +112,22 @@ public class ClusterPartitionState {
         }
         for (PartitionInfo partitionInfo : _kafkaCluster.partitionsForTopic(topic)) {
           int numInsyncReplicas = partitionInfo.inSyncReplicas().length;
+          boolean hasOfflineReplicas = partitionInfo.offlineReplicas().length != 0;
           boolean isURP = numInsyncReplicas != partitionInfo.replicas().length;
+          boolean isOffline = partitionInfo.leader() == null;
+
           if (numInsyncReplicas < minInsyncReplicas) {
             underMinIsrPartitions.add(partitionInfo);
           }
-          if (isURP || verbose) {
-            boolean hasOfflineReplica = partitionInfo.offlineReplicas().length != 0;
-            if (hasOfflineReplica) {
-              partitionsWithOfflineReplicas.add(partitionInfo);
-            }
-            boolean isOffline = partitionInfo.inSyncReplicas().length == 0;
-            if (isOffline) {
-              offlinePartitions.add(partitionInfo);
-            } else if (isURP) {
-              underReplicatedPartitions.add(partitionInfo);
-            } else {
-              // verbose -- other
-              otherPartitions.add(partitionInfo);
-            }
+          if (hasOfflineReplicas) {
+            partitionsWithOfflineReplicas.add(partitionInfo);
+          }
+          if (isURP) {
+            underReplicatedPartitions.add(partitionInfo);
+          } else if (isOffline) {
+            offlinePartitions.add(partitionInfo);
+          } else if (verbose) {
+            otherPartitions.add(partitionInfo);
           }
         }
       }
