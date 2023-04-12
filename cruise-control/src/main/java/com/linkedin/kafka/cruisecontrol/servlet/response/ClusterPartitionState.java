@@ -18,6 +18,8 @@ import java.util.stream.Stream;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.config.TopicConfig;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 
 @JsonResponseClass
@@ -35,6 +37,7 @@ public class ClusterPartitionState {
   public static final String MIN_INSYNC_REPLICAS = "min.insync.replicas";
   public static final int DEFAULT_MIN_INSYNC_REPLICAS = 1;
   public static final boolean DEFAULT_REMOTE_STORAGE_ENABLED = false;
+  private static final Logger LOG = LoggerFactory.getLogger(ClusterPartitionState.class);
 
   protected final Set<PartitionInfo> _underReplicatedPartitions;
   protected final Set<PartitionInfo> _offlinePartitions;
@@ -129,6 +132,7 @@ public class ClusterPartitionState {
           } else if (verbose) {
             otherPartitions.add(partitionInfo);
           }
+          LOG.warn("PI: {} -- LEADER: {}", partitionInfo, partitionInfo.leader());
         }
       }
     }
