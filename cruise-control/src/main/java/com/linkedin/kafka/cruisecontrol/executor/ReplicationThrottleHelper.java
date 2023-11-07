@@ -384,6 +384,8 @@ class ReplicationThrottleHelper {
   }
 
   static boolean configsEqual(Config configs, Map<String, String> expectedValues) {
+    LOG.debug("Configs from kafka: {}", configs.toString());
+    LOG.debug("Expected configs: {}", expectedValues.toString());
     for (Map.Entry<String, String> entry : expectedValues.entrySet()) {
       ConfigEntry configEntry = configs.get(entry.getKey());
       if (configEntry == null || configEntry.value() == null || configEntry.value().isEmpty()) {
