@@ -349,16 +349,26 @@ class ReplicationThrottleHelper {
       if (currLeaderThrottle.value().equals(WILDCARD_ASTERISK)) {
         LOG.debug("Existing config throttles all leader replicas. So, do not remove any leader replica throttle on broker {}", brokerId);
       } else {
-        LOG.debug("Removing leader throttle on broker {}", brokerId);
-        ops.add(new AlterConfigOp(new ConfigEntry(LEADER_THROTTLED_RATE, null), AlterConfigOp.OpType.DELETE));
+        LOG.debug("currLeaderThrottle: {}", currLeaderThrottle);
+        if (currLeaderThrottle.source().equals(ConfigEntry.ConfigSource.DYNAMIC_BROKER_CONFIG)) {
+          LOG.debug("Removing leader throttle on broker {}", brokerId);
+          ops.add(new AlterConfigOp(new ConfigEntry(LEADER_THROTTLED_RATE, null), AlterConfigOp.OpType.DELETE));
+        } else {
+          LOG.debug("Non-dynamic leader throttle on broker {}, {}", brokerId, currLeaderThrottle);
+        }
       }
     }
     if (currFollowerThrottle != null) {
       if (currFollowerThrottle.value().equals(WILDCARD_ASTERISK)) {
         LOG.debug("Existing config throttles all follower replicas. So, do not remove any follower replica throttle on broker {}", brokerId);
       } else {
-        LOG.debug("Removing follower throttle on broker {}", brokerId);
-        ops.add(new AlterConfigOp(new ConfigEntry(FOLLOWER_THROTTLED_RATE, null), AlterConfigOp.OpType.DELETE));
+        LOG.debug("currFollowerThrottle: {}", currFollowerThrottle);
+        if (currFollowerThrottle.source().equals(ConfigEntry.ConfigSource.DYNAMIC_BROKER_CONFIG)) {
+          LOG.debug("Removing follower throttle on broker {}", brokerId);
+          ops.add(new AlterConfigOp(new ConfigEntry(FOLLOWER_THROTTLED_RATE, null), AlterConfigOp.OpType.DELETE));
+        } else {
+          LOG.debug("Non-dynamic follower throttle on broker {}, {}", brokerId, currFollowerThrottle);
+        }
       }
     }
     if (!ops.isEmpty()) {
