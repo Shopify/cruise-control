@@ -383,7 +383,15 @@ class ReplicationThrottleHelper {
             .collect(HashMap::new, (m, o) -> m.put(o.configEntry().name(), o.configEntry().value()), HashMap::putAll);
     boolean retryResponse = CruiseControlMetricsUtils.retry(() -> {
       try {
-        return !configsEqual(getEntityConfigs(cf), expectedConfigs);
+        Config entityConfigs = getEntityConfigs(cf);
+        for (Map.Entry<String, String> entry : expectedConfigs.entrySet()) {
+          ConfigEntry configEntry = entityConfigs.get(entry.getKey());
+          if (configEntry != null && configEntry.source().equals(ConfigEntry.ConfigSource.STATIC_BROKER_CONFIG) && entry.getValue() == null) {
+            LOG.debug("Found static config: {} after dynamic config: {} was removed", configEntry, entry);
+            entry.setValue(configEntry.value());
+          }
+        }
+        return !configsEqual(entityConfigs, expectedConfigs);
       } catch (ExecutionException | InterruptedException | TimeoutException e) {
         return false;
       }
