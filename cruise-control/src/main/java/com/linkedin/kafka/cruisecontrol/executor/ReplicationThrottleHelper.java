@@ -351,7 +351,7 @@ class ReplicationThrottleHelper {
       } else {
         LOG.debug("currLeaderThrottle: {}", currLeaderThrottle);
         if (currLeaderThrottle.source().equals(ConfigEntry.ConfigSource.DYNAMIC_BROKER_CONFIG)) {
-          LOG.debug("Removing leader throttle on broker {}", brokerId);
+          LOG.debug("Removing leader throttle rate: {} on broker {}", currLeaderThrottle, brokerId);
           ops.add(new AlterConfigOp(new ConfigEntry(LEADER_THROTTLED_RATE, null), AlterConfigOp.OpType.DELETE));
         } else {
           LOG.debug("Non-dynamic leader throttle on broker {}, {}", brokerId, currLeaderThrottle);
@@ -364,7 +364,7 @@ class ReplicationThrottleHelper {
       } else {
         LOG.debug("currFollowerThrottle: {}", currFollowerThrottle);
         if (currFollowerThrottle.source().equals(ConfigEntry.ConfigSource.DYNAMIC_BROKER_CONFIG)) {
-          LOG.debug("Removing follower throttle on broker {}", brokerId);
+          LOG.debug("Removing follower throttle rate: {} on broker {}", currFollowerThrottle, brokerId);
           ops.add(new AlterConfigOp(new ConfigEntry(FOLLOWER_THROTTLED_RATE, null), AlterConfigOp.OpType.DELETE));
         } else {
           LOG.debug("Non-dynamic follower throttle on broker {}, {}", brokerId, currFollowerThrottle);
@@ -384,11 +384,13 @@ class ReplicationThrottleHelper {
     boolean retryResponse = CruiseControlMetricsUtils.retry(() -> {
       try {
         Config entityConfigs = getEntityConfigs(cf);
+        LOG.debug("waitforconfigs - leader replication throttled rate: {}", entityConfigs.get(LEADER_THROTTLED_RATE));
+        LOG.debug("waitforconfigs - follower replication throttled rate: {}", entityConfigs.get(FOLLOWER_THROTTLED_RATE));
         for (Map.Entry<String, String> entry : expectedConfigs.entrySet()) {
           ConfigEntry configEntry = entityConfigs.get(entry.getKey());
           if (configEntry != null && configEntry.source().equals(ConfigEntry.ConfigSource.STATIC_BROKER_CONFIG) && entry.getValue() == null) {
             LOG.debug("Found static config: {} after dynamic config: {} was removed", configEntry, entry);
-            entry.setValue(configEntry.value());
+             entry.setValue(configEntry.value());
           }
         }
         return !configsEqual(entityConfigs, expectedConfigs);
