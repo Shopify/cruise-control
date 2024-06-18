@@ -415,20 +415,23 @@ public class TopicReplicaDistributionGoal extends AbstractGoal {
         continue;
       }
 
+      LOG.info("~~~ Broker {} - topic: {}, numTopicReplicas: {}, lowerLimit: {}, upperLimit: {}, requireLessReplicas: {}, requireMoreReplicas: {}",
+              broker.id(), topic, numTopicReplicas, _balanceLowerLimitByTopic.get(topic), _balanceUpperLimitByTopic.get(topic), requireLessReplicas, requireMoreReplicas);
+
       // Update broker ids over the balance limit for logging purposes.
       if (requireLessReplicas && rebalanceByMovingReplicasOut(broker, topic, clusterModel, optimizedGoals, optimizationOptions)) {
         _brokerIdsAboveBalanceUpperLimitByTopic.computeIfAbsent(topic, t -> new HashSet<>()).add(broker.id());
-        LOG.debug("Failed to sufficiently decrease replicas of topic {} in broker {} with replica movements. Replicas: {}.",
+        LOG.info("Failed to sufficiently decrease replicas of topic {} in broker {} with replica movements. Replicas: {}.",
                   topic, broker.id(), broker.numReplicasOfTopicInBroker(topic));
       }
       if (requireMoreReplicas && rebalanceByMovingReplicasIn(broker, topic, clusterModel, optimizedGoals, optimizationOptions)) {
         _brokerIdsUnderBalanceLowerLimitByTopic.computeIfAbsent(topic, t -> new HashSet<>()).add(broker.id());
-        LOG.debug("Failed to sufficiently increase replicas of topic {} in broker {} with replica movements. Replicas: {}.",
+        LOG.info("Failed to sufficiently increase replicas of topic {} in broker {} with replica movements. Replicas: {}.",
                   topic, broker.id(), broker.numReplicasOfTopicInBroker(topic));
       }
       if (!_brokerIdsAboveBalanceUpperLimitByTopic.getOrDefault(topic, Collections.emptySet()).contains(broker.id())
           && !_brokerIdsUnderBalanceLowerLimitByTopic.getOrDefault(topic, Collections.emptySet()).contains(broker.id())) {
-        LOG.debug("Successfully balanced replicas of topic {} in broker {} by moving replicas. Replicas: {}",
+        LOG.info("Successfully balanced replicas of topic {} in broker {} by moving replicas. Replicas: {}",
                   topic, broker.id(), broker.numReplicasOfTopicInBroker(topic));
       }
     }
