@@ -156,7 +156,9 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
 
   @Override
   public void run() {
-    if (getGoalViolationDetectionStatus() != AnomalyDetectionStatus.READY) {
+    AnomalyDetectionStatus detectionStatus = getGoalViolationDetectionStatus();
+    LOG.info("--- getGoalViolationDetectionStatus {}", detectionStatus);
+    if (detectionStatus != AnomalyDetectionStatus.READY) {
       return;
     }
 
@@ -187,6 +189,7 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
       final Timer.Context ctx = _goalViolationDetectionTimer.time();
       try {
         for (Goal goal : _detectionGoals) {
+          LOG.info("--- evaluating goal {}", goal);
           if (_kafkaCruiseControl.loadMonitor().meetCompletenessRequirements(goal.clusterModelCompletenessRequirements())) {
             LOG.debug("Detecting if {} is violated.", goal.name());
             // Because the model generation could be slow, We only get new cluster model if needed.
