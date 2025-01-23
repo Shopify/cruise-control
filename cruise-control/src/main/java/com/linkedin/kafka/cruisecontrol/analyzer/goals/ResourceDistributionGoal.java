@@ -270,8 +270,11 @@ public abstract class ResourceDistributionGoal extends AbstractGoal {
 
       // Any capacity greater than the allowed capacity may yield over-provisioning.
       double allowedCapacity = resourceUtilization / _balancingConstraint.lowUtilizationThreshold(resource());
+      LOG.info("--- allowedCapacity: {}", allowedCapacity);
       int allowedNumBrokers = (int) (allowedCapacity / typicalCapacity);
+      LOG.info("--- allowedNumBrokers: {}", allowedNumBrokers);
       int numBrokersToDrop = Math.max(_brokersAllowedReplicaMove.size() - allowedNumBrokers, 1);
+      LOG.info("--- numBrokersToDrop: {}", numBrokersToDrop);
       _overProvisionedRecommendation = new ProvisionRecommendation.Builder(ProvisionStatus.OVER_PROVISIONED)
           .numBrokers(numBrokersToDrop).typicalBrokerCapacity(typicalCapacity).typicalBrokerId(typicalBrokerId).resource(resource()).build();
     }
@@ -315,7 +318,7 @@ public abstract class ResourceDistributionGoal extends AbstractGoal {
       }
     }
     if (!brokerIdsAboveBalanceUpperLimit.isEmpty()) {
-      LOG.debug("Utilization for broker ids:{} {} above the balance limit for:{} after {}.",
+      LOG.info("Utilization for broker ids:{} {} above the balance limit for:{} after {}.",
                 brokerIdsAboveBalanceUpperLimit, (brokerIdsAboveBalanceUpperLimit.size() > 1) ? "are" : "is", resource(),
                 (clusterModel.selfHealingEligibleReplicas().isEmpty()) ? "rebalance" : "self-healing");
       _succeeded = false;
@@ -324,12 +327,13 @@ public abstract class ResourceDistributionGoal extends AbstractGoal {
       _provisionResponse = new ProvisionResponse(ProvisionStatus.OVER_PROVISIONED, _overProvisionedRecommendation, name());
     }
     if (!brokerIdsUnderBalanceLowerLimit.isEmpty()) {
-      LOG.debug("Utilization for broker ids:{} {} under the balance limit for:{} after {}.",
+      LOG.info("Utilization for broker ids:{} {} under the balance limit for:{} after {}.",
                 brokerIdsUnderBalanceLowerLimit, (brokerIdsUnderBalanceLowerLimit.size() > 1) ? "are" : "is", resource(),
                 (clusterModel.selfHealingEligibleReplicas().isEmpty()) ? "rebalance" : "self-healing");
       _succeeded = false;
     } else if (brokerIdsAboveBalanceUpperLimit.isEmpty() && !_isLowUtilization) {
       // All brokers are within the upper and lower balance limits and the cluster is not under a low utilization state.
+      LOG.info("--- setting provision response as rightsized");
       _provisionResponse = new ProvisionResponse(ProvisionStatus.RIGHT_SIZED);
     }
     // Sanity check: No self-healing eligible replica should remain at a dead broker/disk.
