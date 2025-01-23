@@ -191,9 +191,10 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
         for (Goal goal : _detectionGoals) {
           LOG.info("--- evaluating goal {}", goal);
           if (_kafkaCruiseControl.loadMonitor().meetCompletenessRequirements(goal.clusterModelCompletenessRequirements())) {
-            LOG.debug("Detecting if {} is violated.", goal.name());
+            LOG.info("Detecting if {} is violated.", goal.name());
             // Because the model generation could be slow, We only get new cluster model if needed.
             if (newModelNeeded) {
+              LOG.info("--- newModelNeeded {}", newModelNeeded);
               if (clusterModelSemaphore != null) {
                 clusterModelSemaphore.close();
               }
@@ -219,28 +220,36 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
           } else {
             LOG.warn("Skipping goal violation detection for {} because load completeness requirement is not met.", goal);
           }
+          LOG.info("---aggregating");
           provisionResponse.aggregate(goal.provisionResponse());
+          LOG.info("---done aggregating");
         }
       } finally {
+        LOG.info("---Stopping ctx");
         ctx.stop();
       }
       _provisionResponse = provisionResponse;
+      LOG.info("---provisionResponse: {}.", provisionResponse);
       if (_isProvisionerEnabled) {
         // Rightsize the cluster (if needed)
         ProvisionerState provisionerState = _provisioner.rightsize(_provisionResponse.recommendationByRecommender(), new RightsizeOptions());
+        LOG.info("---Provisioner state: {}.", provisionerState);
         if (provisionerState != null) {
           LOG.info("Provisioner state: {}.", provisionerState);
           _automatedRightsizingMeter.mark();
         }
       }
       Map<Boolean, List<String>> violatedGoalsByFixability = goalViolations.violatedGoalsByFixability();
+      LOG.info("---violatedGoalsByFixability: {}.", violatedGoalsByFixability);
       if (!violatedGoalsByFixability.isEmpty()) {
         goalViolations.setProvisionResponse(_provisionResponse);
         _anomalies.add(goalViolations);
       }
+      LOG.info("---refreshing balancedness");
       refreshBalancednessScore(violatedGoalsByFixability);
+      LOG.info("---done refreshing balancedness");
     } catch (NotEnoughValidWindowsException nevwe) {
-      LOG.debug("Skipping goal violation detection because there are not enough valid windows.", nevwe);
+      LOG.info("Skipping goal violation detection because there are not enough valid windows.", nevwe);
     } catch (KafkaCruiseControlException kcce) {
       LOG.warn("Goal violation detector received exception", kcce);
     } catch (Exception e) {
@@ -253,7 +262,7 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
           LOG.error("Received exception when closing auto closable semaphore", e);
         }
       }
-      LOG.debug("Goal violation detection finished.");
+      LOG.info("Goal violation detection finished.");
     }
   }
 
