@@ -316,10 +316,12 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
     Map<TopicPartition, List<ReplicaPlacementInfo>> initReplicaDistribution = clusterModel.getReplicaDistribution();
     Map<TopicPartition, ReplicaPlacementInfo> initLeaderDistribution = clusterModel.getLeaderDistribution();
     try {
+      LOG.info("--- optimizing for goal");
       OptimizationOptions options = _optimizationOptionsGenerator.optimizationOptionsForGoalViolationDetection(clusterModel,
                                                                                                                excludedTopics(clusterModel),
                                                                                                                excludedBrokersForLeadership,
                                                                                                                excludedBrokersForReplicaMove);
+      LOG.info("--- options: {}", options);
       if (checkPartitionsWithRFGreaterThanNumRacks) {
         _hasPartitionsWithRFGreaterThanNumRacks = clusterModel.maxReplicationFactor() > clusterModel.aliveRacksAllowedReplicaMoves(options).size();
       }
@@ -329,6 +331,7 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
       // lack of physical hardware (e.g. insufficient number of racks to satisfy rack awareness, insufficient number
       // of brokers to satisfy Replica Capacity Goal, or insufficient number of resources to satisfy resource
       // capacity goals), or (2) a failure to move offline replicas away from dead brokers/disks.
+      LOG.info("--- OptimizationFailureException for goal: {}", goal.name());
       goalViolations.addViolation(goal.name(), false);
       return true;
     }
@@ -337,9 +340,11 @@ public class GoalViolationDetector extends AbstractAnomalyDetector implements Ru
     if (hasDiff) {
       // A goal violation that can be optimized by applying the generated proposals.
       goalViolations.addViolation(goal.name(), true);
+      LOG.info("--- found goalViolation that can be optimized: {}", goal.name());
       return true;
     } else {
       // The goal is already satisfied.
+      LOG.info("--- goal already satisfied: {}", goal.name());
       return false;
     }
   }

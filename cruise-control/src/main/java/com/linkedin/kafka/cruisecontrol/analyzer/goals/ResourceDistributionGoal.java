@@ -277,6 +277,7 @@ public abstract class ResourceDistributionGoal extends AbstractGoal {
       LOG.info("--- numBrokersToDrop: {}", numBrokersToDrop);
       _overProvisionedRecommendation = new ProvisionRecommendation.Builder(ProvisionStatus.OVER_PROVISIONED)
           .numBrokers(numBrokersToDrop).typicalBrokerCapacity(typicalCapacity).typicalBrokerId(typicalBrokerId).resource(resource()).build();
+      LOG.info("--- _overProvisionedRecommendation: {}", _overProvisionedRecommendation.toString());
     }
   }
 
@@ -397,6 +398,7 @@ public abstract class ResourceDistributionGoal extends AbstractGoal {
     boolean moveImmigrantsOnly = false;
     if (broker.currentOfflineReplicas().isEmpty()) {
       if (!requireMoreLoad && !requireLessLoad) {
+        LOG.info("--- broker already within limits");
         // return if the broker is already within limits.
         return;
       }

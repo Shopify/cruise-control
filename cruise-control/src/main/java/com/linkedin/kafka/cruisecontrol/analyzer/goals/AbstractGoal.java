@@ -85,14 +85,15 @@ public abstract class AbstractGoal implements Goal {
       _succeeded = true;
       // Resetting the provision response ensures fresh provision response if the same goal is optimized multiple times.
       _provisionResponse = new ProvisionResponse(UNDECIDED);
-      LOG.debug("Starting optimization for {}.", name());
+      LOG.info("---Starting optimization for {}.", name());
       // Initialize pre-optimized stats.
       ClusterModelStats statsBeforeOptimization = clusterModel.getClusterStats(_balancingConstraint, optimizationOptions);
-      LOG.trace("[PRE - {}] {}", name(), statsBeforeOptimization);
+      LOG.info("---[PRE - {}] {}", name(), statsBeforeOptimization);
       _finished = false;
       long goalStartTime = System.currentTimeMillis();
       initGoalState(clusterModel, optimizationOptions);
       SortedSet<Broker> brokenBrokers = clusterModel.brokenBrokers();
+      LOG.info("--- broken brokers: {}", brokenBrokers);
       boolean originallyHasExcludedBrokersForReplicaMoveWithReplicas = hasExcludedBrokersForReplicaMoveWithReplicas(clusterModel,
                                                                                                                     optimizationOptions);
       while (!_finished) {
@@ -102,11 +103,11 @@ public abstract class AbstractGoal implements Goal {
         updateGoalState(clusterModel, optimizationOptions);
       }
       ClusterModelStats statsAfterOptimization = clusterModel.getClusterStats(_balancingConstraint, optimizationOptions);
-      LOG.trace("[POST - {}] {}", name(), statsAfterOptimization);
+      LOG.info("---[POST - {}] {}", name(), statsAfterOptimization);
       if (LOG.isDebugEnabled()) {
-        LOG.debug("Finished optimization for {} in {}ms.", name(), System.currentTimeMillis() - goalStartTime);
+        LOG.info("---Finished optimization for {} in {}ms.", name(), System.currentTimeMillis() - goalStartTime);
       }
-      LOG.trace("Cluster after optimization is {}", clusterModel);
+      LOG.info("---Cluster after optimization is {}", clusterModel);
       // The optimization cannot make stats worse unless the cluster has (1) broken brokers or (2) excluded brokers for replica move with replicas.
       if (brokenBrokers.isEmpty() && !originallyHasExcludedBrokersForReplicaMoveWithReplicas) {
         ClusterModelStatsComparator comparator = clusterModelStatsComparator();
@@ -121,6 +122,7 @@ public abstract class AbstractGoal implements Goal {
       // expected number of brokers after the provisioning will still be larger than or equal to the max RF
       _provisionResponse =
           GoalUtils.validateProvisionResponse(_provisionResponse, clusterModel, _balancingConstraint.overprovisionedMinBrokers());
+      LOG.info("--- validated provision response: {}", _provisionResponse.toString());
       return _succeeded;
     } catch (OptimizationFailureException ofe) {
       _provisionResponse = new ProvisionResponse(UNDER_PROVISIONED, ofe.provisionRecommendation(), name());
