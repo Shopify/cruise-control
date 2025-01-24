@@ -141,6 +141,8 @@ public abstract class ReplicaDistributionAbstractGoal extends AbstractGoal {
     _fixOfflineReplicasOnly = false;
     _balanceUpperLimit = balanceUpperLimit(optimizationOptions, balancePercentage());
     _balanceLowerLimit = balanceLowerLimit(optimizationOptions, balancePercentage());
+    LOG.info("--- _balanceUpperLimit: {}", _balanceUpperLimit);
+    LOG.info("--- _balanceLowerLimit: {}", _balanceLowerLimit);
   }
 
   /**

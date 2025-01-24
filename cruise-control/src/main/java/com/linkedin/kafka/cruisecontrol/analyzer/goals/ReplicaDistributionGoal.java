@@ -97,6 +97,7 @@ public class ReplicaDistributionGoal extends ReplicaDistributionAbstractGoal {
   protected void updateGoalState(ClusterModel clusterModel, OptimizationOptions optimizationOptions) throws OptimizationFailureException {
     super.updateGoalState(clusterModel, optimizationOptions);
     Integer numBrokersToDrop = numBrokersToDrop(clusterModel);
+    LOG.info("--- updateGoalState numBrokersToDrop: {}", numBrokersToDrop);
     if (numBrokersToDrop != null) {
       ProvisionRecommendation recommendation = new ProvisionRecommendation.Builder(ProvisionStatus.OVER_PROVISIONED)
           .numBrokers(numBrokersToDrop).build();
