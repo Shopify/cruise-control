@@ -322,19 +322,22 @@ public abstract class ResourceDistributionGoal extends AbstractGoal {
                 brokerIdsAboveBalanceUpperLimit, (brokerIdsAboveBalanceUpperLimit.size() > 1) ? "are" : "is", resource(),
                 (clusterModel.selfHealingEligibleReplicas().isEmpty()) ? "rebalance" : "self-healing");
       _succeeded = false;
+      LOG.info("--- setting succeeded = false");
     } else if (_isLowUtilization) {
       // Cluster is under a low utilization state and all brokers are under the corresponding balance upper limit.
       _provisionResponse = new ProvisionResponse(ProvisionStatus.OVER_PROVISIONED, _overProvisionedRecommendation, name());
+      LOG.info("--- _isLowUtilization for _provisionResponse: {}", _provisionResponse);
     }
     if (!brokerIdsUnderBalanceLowerLimit.isEmpty()) {
       LOG.info("Utilization for broker ids:{} {} under the balance limit for:{} after {}.",
                 brokerIdsUnderBalanceLowerLimit, (brokerIdsUnderBalanceLowerLimit.size() > 1) ? "are" : "is", resource(),
                 (clusterModel.selfHealingEligibleReplicas().isEmpty()) ? "rebalance" : "self-healing");
       _succeeded = false;
+      LOG.info("--- setting succeeded = false");
     } else if (brokerIdsAboveBalanceUpperLimit.isEmpty() && !_isLowUtilization) {
       // All brokers are within the upper and lower balance limits and the cluster is not under a low utilization state.
-      LOG.info("--- setting provision response as rightsized");
       _provisionResponse = new ProvisionResponse(ProvisionStatus.RIGHT_SIZED);
+      LOG.info("--- setting provision response as rightsized: {}", _provisionResponse);
     }
     // Sanity check: No self-healing eligible replica should remain at a dead broker/disk.
     try {
