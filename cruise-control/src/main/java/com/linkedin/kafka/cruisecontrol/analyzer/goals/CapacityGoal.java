@@ -343,6 +343,7 @@ public abstract class CapacityGoal extends AbstractGoal {
         }
       }
     }
+    LOG.info("--- isUtilizationOverLimit: {}", isUtilizationOverLimit);
 
     // Ensure that the requirements of the capacity goal are satisfied after the balance.
     postSanityCheck(isUtilizationOverLimit, broker, brokerCapacityLimit, hostCapacityLimit);
@@ -373,6 +374,7 @@ public abstract class CapacityGoal extends AbstractGoal {
       throw new OptimizationFailureException(String.format("[%s] Cannot remove offline replicas from broker %d.", name(), broker.id()),
                                              recommendation);
     }
+    LOG.info("---post sanity check");
   }
 
   /**

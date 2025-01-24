@@ -890,12 +890,14 @@ public abstract class ResourceDistributionGoal extends AbstractGoal {
                                                           Broker broker,
                                                           ChangeType changeType) {
     double utilizationDelta = load == null ? 0 : load.expectedUtilizationFor(resource());
-
+    LOG.info("---utilizationDelta: {}", utilizationDelta);
     double brokerBalanceLowerLimit = broker.capacityFor(resource()) * _balanceLowerThreshold;
+    LOG.info("---_balanceLowerThreshold: {}", _balanceLowerThreshold);
     double brokerUtilization = broker.load().expectedUtilizationFor(resource());
     boolean isBrokerAboveLowerLimit = changeType == ADD ? brokerUtilization + utilizationDelta >= brokerBalanceLowerLimit
                                                         : brokerUtilization - utilizationDelta >= brokerBalanceLowerLimit;
-
+    LOG.info("---brokerUtilization: {}", brokerUtilization);
+    LOG.info("---isBrokerAboveLowerLimit: {}", isBrokerAboveLowerLimit);
     if (resource().isHostResource()) {
       double hostBalanceLowerLimit = broker.host().capacityFor(resource()) * _balanceLowerThreshold;
       double hostUtilization = broker.host().load().expectedUtilizationFor(resource());
@@ -904,8 +906,11 @@ public abstract class ResourceDistributionGoal extends AbstractGoal {
       // As long as either the host or the broker is above the limit, we claim the host resource utilization is
       // above the limit. If the host is below limit, there must be at least one broker below limit. We should just
       // bring more load to that broker.
+      LOG.info("---isHostAboveLowerLimit: {}", isHostAboveLowerLimit);
+      LOG.info("---resource is host resource -- isBrokerAboveLowerLimit: {}", isBrokerAboveLowerLimit);
       return isHostAboveLowerLimit || isBrokerAboveLowerLimit;
     } else {
+      LOG.info("---isBrokerAboveLowerLimit: {}", isBrokerAboveLowerLimit);
       return isBrokerAboveLowerLimit;
     }
   }
@@ -915,11 +920,14 @@ public abstract class ResourceDistributionGoal extends AbstractGoal {
                                                           ChangeType changeType,
                                                           double balanceUpperThresholdForBroker) {
     double utilizationDelta = load == null ? 0 : load.expectedUtilizationFor(resource());
-
+    LOG.info("---utilizationDelta: {}", utilizationDelta);
     double brokerBalanceUpperLimit = broker.capacityFor(resource()) * balanceUpperThresholdForBroker;
+    LOG.info("---brokerBalanceUpperLimit: {}", brokerBalanceUpperLimit);
     double brokerUtilization = broker.load().expectedUtilizationFor(resource());
     boolean isBrokerUnderUpperLimit = changeType == ADD ? brokerUtilization + utilizationDelta <= brokerBalanceUpperLimit
                                                         : brokerUtilization - utilizationDelta <= brokerBalanceUpperLimit;
+    LOG.info("---brokerUtilization: {}", brokerUtilization);
+    LOG.info("---isBrokerUnderUpperLimit: {}", isBrokerUnderUpperLimit);
 
     if (resource().isHostResource()) {
       double hostBalanceUpperLimit = broker.host().capacityFor(resource()) * balanceUpperThresholdForBroker;
@@ -929,8 +937,12 @@ public abstract class ResourceDistributionGoal extends AbstractGoal {
       // As long as either the host or the broker is under the limit, we claim the host resource utilization is
       // under the limit. If the host is above limit, there must be at least one broker above limit. We should just
       // move load off that broker.
+      LOG.info("---isHostUnderUpperLimit: {}", isHostUnderUpperLimit);
+      LOG.info("---resource is host resource -- isBrokerUnderUpperLimit: {}", isBrokerUnderUpperLimit);
+
       return isHostUnderUpperLimit || isBrokerUnderUpperLimit;
     } else {
+      LOG.info("---isBrokerUnderUpperLimit: {}", isBrokerUnderUpperLimit);
       return isBrokerUnderUpperLimit;
     }
   }
