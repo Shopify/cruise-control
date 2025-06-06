@@ -259,7 +259,8 @@ public class ExecutionTaskPlanner {
    */
   private void maybeAddLeaderChangeTasks(Collection<ExecutionProposal> proposals, Cluster cluster) {
     for (ExecutionProposal proposal : proposals) {
-      if (proposal.hasLeaderAction()) {
+      // Only create LEADER_ACTION tasks for pure leadership movements (no replica set changes)
+      if (proposal.hasLeaderAction() && !proposal.hasReplicaAction()) {
         Node currentLeader = cluster.leaderFor(proposal.topicPartition());
         if (currentLeader != null && currentLeader.id() != proposal.newLeader().brokerId()) {
           // Get the execution Id for the leader action proposal execution;

@@ -16,14 +16,20 @@ import com.linkedin.kafka.cruisecontrol.analyzer.ProvisionStatus;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.kafka.cruisecontrol.config.constants.MonitorConfig;
 import com.linkedin.kafka.cruisecontrol.exception.OptimizationFailureException;
+import com.linkedin.kafka.cruisecontrol.exception.PartitionNotExistsException;
+import com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUtils;
 import com.linkedin.kafka.cruisecontrol.model.Broker;
 import com.linkedin.kafka.cruisecontrol.model.ClusterModel;
 import com.linkedin.kafka.cruisecontrol.model.ClusterModelStats;
 import com.linkedin.kafka.cruisecontrol.model.Disk;
 import com.linkedin.kafka.cruisecontrol.model.Replica;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.SortedSet;
+import org.apache.kafka.common.Cluster;
+import org.apache.kafka.common.Node;
+import org.apache.kafka.common.PartitionInfo;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import java.util.Collection;
@@ -50,6 +56,7 @@ public abstract class AbstractGoal implements Goal {
   protected int _numWindows;
   protected double _minMonitoredPartitionPercentage;
   protected ProvisionResponse _provisionResponse;
+  protected Cluster _kafkaCluster;
 
   /**
    * Constructor of Abstract Goal class sets the
@@ -71,6 +78,68 @@ public abstract class AbstractGoal implements Goal {
     _balancingConstraint = new BalancingConstraint(parsedConfig);
     _numWindows = parsedConfig.getInt(MonitorConfig.NUM_PARTITION_METRICS_WINDOWS_CONFIG);
     _minMonitoredPartitionPercentage = parsedConfig.getDouble(MonitorConfig.MIN_VALID_PARTITION_RATIO_CONFIG);
+  }
+
+  /**
+   * Set the Kafka cluster metadata for ISR safety checks.
+   *
+   * @param kafkaCluster The Kafka cluster metadata.
+   */
+  public void setKafkaCluster(Cluster kafkaCluster) {
+    _kafkaCluster = kafkaCluster;
+  }
+
+  /**
+   * Safety check for KAFKA-19148: Prevent replica movements that could trigger unclean leader elections
+   * in KRaft mode. The issue occurs specifically when moving a leader replica to a broker that is not
+   * currently part of the partition's replica set (i.e., adding a new replica that is out-of-sync by definition).
+   *
+   * @param replica The replica being moved.
+   * @param destinationBroker The destination broker for the move.
+   * @param action The type of action being performed.
+   * @return true if the move is safe to proceed, false if it should be skipped.
+   */
+  private boolean isReplicaMoveSafeForKRaft(Replica replica, Broker destinationBroker, ActionType action) {
+    // Only check inter-broker movements that could affect ISR (and if cluster metadata is available)
+    if (_kafkaCluster == null ||
+        (action != ActionType.INTER_BROKER_REPLICA_MOVEMENT &&
+         action != ActionType.INTER_BROKER_REPLICA_SWAP)) {
+      return true;
+    }
+
+    // Only check if we're moving a leader replica
+    if (!replica.isLeader()) {
+      return true;
+    }
+
+    org.apache.kafka.common.TopicPartition topicPartition = replica.topicPartition();
+
+    try {
+      PartitionInfo partitionInfo = _kafkaCluster.partition(topicPartition);
+      if (partitionInfo == null) {
+        LOG.warn("Partition {} does not exist, skipping safety check", topicPartition);
+        return false;
+      }
+
+      // Check if destination broker is already part of the partition's replica set
+      boolean destinationIsExistingReplica = Arrays.stream(partitionInfo.replicas())
+          .anyMatch(node -> node.id() == destinationBroker.id());
+
+      // KAFKA-19148 trigger condition: Moving leader to a new broker (not in replica set)
+      // This means we're adding a new replica (always out-of-sync) while removing the leader
+      if (!destinationIsExistingReplica) {
+        LOG.warn("Skipping leader replica movement for partition {} to prevent KAFKA-19148: " +
+                 "destination broker {} is not in current replica set, would add new out-of-sync replica while removing leader",
+                 topicPartition, destinationBroker.id());
+        return false;
+      }
+
+    } catch (Exception e) {
+      LOG.warn("Error during KAFKA-19148 safety check for partition {}, skipping move", topicPartition, e);
+      return false;
+    }
+
+    return true;
   }
 
   private static boolean hasExcludedBrokersForReplicaMoveWithReplicas(ClusterModel clusterModel, OptimizationOptions optimizationOptions) {
@@ -252,6 +321,12 @@ public abstract class AbstractGoal implements Goal {
         continue;
       }
 
+      // KAFKA-19148 safety check: Prevent replica movements that could trigger unclean leader elections
+      if (!isReplicaMoveSafeForKRaft(replica, broker, action)) {
+        LOG.trace("Skipping replica move to prevent KAFKA-19148 for {}.", proposal);
+        continue;
+      }
+
       if (!selfSatisfied(clusterModel, proposal)) {
         LOG.trace("Unable to self-satisfy proposal {}.", proposal);
         continue;
@@ -312,6 +387,17 @@ public abstract class AbstractGoal implements Goal {
 
       if (!legitMove(destinationReplica, sourceReplica.broker(), clusterModel, ActionType.INTER_BROKER_REPLICA_MOVEMENT)) {
         LOG.trace("Swap from destination to source broker is not legit for {}.", swapProposal);
+        continue;
+      }
+
+      // KAFKA-19148 safety check for both replicas involved in the swap
+      if (!isReplicaMoveSafeForKRaft(sourceReplica, destinationBroker, ActionType.INTER_BROKER_REPLICA_SWAP)) {
+        LOG.trace("Skipping swap to prevent KAFKA-19148 for source replica in {}.", swapProposal);
+        continue;
+      }
+
+      if (!isReplicaMoveSafeForKRaft(destinationReplica, sourceReplica.broker(), ActionType.INTER_BROKER_REPLICA_SWAP)) {
+        LOG.trace("Skipping swap to prevent KAFKA-19148 for destination replica in {}.", swapProposal);
         continue;
       }
 

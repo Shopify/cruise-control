@@ -9,6 +9,7 @@ import com.codahale.metrics.MetricRegistry;
 import com.codahale.metrics.Timer;
 import com.linkedin.kafka.cruisecontrol.common.Utils;
 import com.linkedin.kafka.cruisecontrol.analyzer.goals.Goal;
+import com.linkedin.kafka.cruisecontrol.analyzer.goals.AbstractGoal;
 import com.linkedin.kafka.cruisecontrol.config.BrokerSetResolver;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.kafka.cruisecontrol.common.KafkaCruiseControlThreadFactory;
@@ -461,6 +462,12 @@ public class GoalOptimizer implements Runnable {
       OptimizationForGoal step = new OptimizationForGoal(goal.name());
       operationProgress.addStep(step);
       LOG.debug("Optimizing goal {}", goal.name());
+      
+      // Automatically set Kafka cluster metadata for KAFKA-19148 protection
+      if (goal instanceof AbstractGoal) {
+        ((AbstractGoal) goal).setKafkaCluster(_loadMonitor.kafkaCluster());
+      }
+      
       long startTimeMs = _time.milliseconds();
       boolean succeeded;
       try {
