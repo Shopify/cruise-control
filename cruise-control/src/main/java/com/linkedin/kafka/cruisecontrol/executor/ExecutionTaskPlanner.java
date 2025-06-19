@@ -13,6 +13,7 @@ import com.linkedin.kafka.cruisecontrol.executor.strategy.ReplicaMovementStrateg
 import com.linkedin.kafka.cruisecontrol.executor.strategy.StrategyOptions;
 import com.linkedin.kafka.cruisecontrol.model.ReplicaPlacementInfo;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
@@ -190,6 +191,35 @@ public class ExecutionTaskPlanner {
         LOG.trace("Ignored the attempt to move non-existing partition for topic partition: {}", tp);
         continue;
       }
+
+      // Log current state vs proposal for debugging
+      if (LOG.isDebugEnabled()) {
+        Set<Integer> currentReplicas = Arrays.stream(partitionInfo.replicas()).map(Node::id).collect(Collectors.toSet());
+        Set<Integer> currentIsr = Arrays.stream(partitionInfo.inSyncReplicas()).map(Node::id).collect(Collectors.toSet());
+        Set<Integer> proposedReplicas = proposal.newReplicas().stream()
+            .map(ReplicaPlacementInfo::brokerId)
+            .collect(Collectors.toSet());
+
+        LOG.debug("Evaluating proposal for partition {}: current replicas={}, ISR={}, leader={}, " +
+                  "proposal: {} -> {}, oldLeader={}, newLeader={}",
+                  tp, currentReplicas, currentIsr,
+                  partitionInfo.leader() != null ? partitionInfo.leader().id() : "null",
+                  proposal.oldReplicas().stream().map(ReplicaPlacementInfo::brokerId).collect(Collectors.toList()),
+                  proposedReplicas,
+                  proposal.oldLeader().brokerId(),
+                  proposal.newLeader().brokerId());
+      }
+
+      // KAFKA-19148 validation: Check if the proposal would cause unclean leader election
+      if (wouldCauseUncleanLeaderElection(proposal, partitionInfo)) {
+        LOG.warn("Skipping proposal for partition {} to prevent KAFKA-19148: moving leader {} to broker {} " +
+                 "which would cause unclean election. Current replicas: {}, ISR: {}",
+                 tp, proposal.oldLeader().brokerId(), proposal.newLeader().brokerId(),
+                 Arrays.stream(partitionInfo.replicas()).map(Node::id).collect(Collectors.toList()),
+                 Arrays.stream(partitionInfo.inSyncReplicas()).map(Node::id).collect(Collectors.toList()));
+        continue;
+      }
+
       if (!proposal.isInterBrokerMovementCompleted(partitionInfo)) {
         long replicaActionExecutionId = _executionId++;
         long executionAlertingThresholdMs = Math.max(Math.round(proposal.dataToMoveInMB() / _interBrokerReplicaMovementRateAlertingThreshold * 1000),
@@ -206,6 +236,50 @@ public class ExecutionTaskPlanner {
                                                                 : replicaMovementStrategy.chainBaseReplicaMovementStrategyIfAbsent();
     _interPartMoveTasksByBrokerId = chosenReplicaMovementTaskStrategy.applyStrategy(_remainingInterBrokerReplicaMovements, strategyOptions);
     _interPartMoveBrokerComparator = brokerComparator(strategyOptions, chosenReplicaMovementTaskStrategy);
+  }
+
+  /**
+   * Check if executing this proposal would cause an unclean leader election (KAFKA-19148).
+   * In KRaft mode, when the current leader is removed from the replica set, Kafka might
+   * elect a non-ISR replica as leader even when ISR members are available in the new set.
+   *
+   * To prevent this, we skip any proposal that:
+   * 1. Removes the current leader from the replica set AND
+   * 2. Has ANY non-ISR replicas in the new replica set
+   *
+   * @param proposal The execution proposal to check
+   * @param partitionInfo Current partition state from Kafka cluster
+   * @return true if this proposal would cause unclean leader election, false otherwise
+   */
+  private boolean wouldCauseUncleanLeaderElection(ExecutionProposal proposal, PartitionInfo partitionInfo) {
+    // Get current leader
+    if (partitionInfo.leader() == null) {
+      return false; // No leader, can't cause unclean election
+    }
+    int currentLeader = partitionInfo.leader().id();
+
+    // Check if current leader is being removed from replica set
+    Set<Integer> proposedReplicas = proposal.newReplicas().stream()
+        .map(ReplicaPlacementInfo::brokerId)
+        .collect(Collectors.toSet());
+
+    if (!proposedReplicas.contains(currentLeader)) {
+      // Current leader being removed - check if ALL proposed replicas are in ISR
+      Set<Integer> currentIsr = Arrays.stream(partitionInfo.inSyncReplicas())
+          .map(Node::id)
+          .collect(Collectors.toSet());
+
+      // Check if ANY proposed replica is NOT in ISR
+      boolean hasNonIsrMember = proposedReplicas.stream()
+          .anyMatch(replica -> !currentIsr.contains(replica));
+
+      if (hasNonIsrMember) {
+        // At least one non-ISR replica in new set - KRaft might elect it as leader
+        return true;
+      }
+    }
+
+    return false;
   }
 
   /**

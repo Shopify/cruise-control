@@ -462,12 +462,14 @@ public class GoalOptimizer implements Runnable {
       OptimizationForGoal step = new OptimizationForGoal(goal.name());
       operationProgress.addStep(step);
       LOG.debug("Optimizing goal {}", goal.name());
-      
+
       // Automatically set Kafka cluster metadata for KAFKA-19148 protection
       if (goal instanceof AbstractGoal) {
-        ((AbstractGoal) goal).setKafkaCluster(_loadMonitor.kafkaCluster());
+        // Refresh metadata to ensure we have the latest cluster state
+        Cluster freshCluster = _loadMonitor.refreshClusterAndGeneration().cluster();
+        ((AbstractGoal) goal).setKafkaCluster(freshCluster);
       }
-      
+
       long startTimeMs = _time.milliseconds();
       boolean succeeded;
       try {
