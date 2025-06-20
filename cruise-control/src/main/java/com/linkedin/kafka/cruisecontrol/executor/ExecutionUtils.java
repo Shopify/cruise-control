@@ -16,6 +16,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -26,22 +27,26 @@ import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 import java.util.concurrent.TimeoutException;
 import javax.annotation.Nullable;
 import org.apache.kafka.clients.CommonClientConfigs;
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.AlterPartitionReassignmentsResult;
 import org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult;
+import org.apache.kafka.clients.admin.DescribeTopicsResult;
 import org.apache.kafka.clients.admin.ElectLeadersResult;
 import org.apache.kafka.clients.admin.ListPartitionReassignmentsResult;
 import org.apache.kafka.clients.admin.NewPartitionReassignment;
 import org.apache.kafka.clients.admin.PartitionReassignment;
+import org.apache.kafka.clients.admin.TopicDescription;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.ElectionType;
 import org.apache.kafka.common.KafkaFuture;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.TopicPartitionInfo;
 import org.apache.kafka.common.protocol.Errors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -436,7 +441,113 @@ public final class ExecutionUtils {
   }
 
   /**
+   * Validates tasks against KAFKA-19148 before submission.
+   * This is a final safety check to prevent unclean leader elections.
+   *
+   * @param adminClient The admin client to get current cluster state.
+   * @param tasks The tasks to validate.
+   * @return List of tasks that are safe to execute.
+   */
+  private static List<ExecutionTask> filterKafka19148UnsafeTasks(AdminClient adminClient, List<ExecutionTask> tasks) {
+    List<ExecutionTask> safeTasks = new ArrayList<>();
+
+    try {
+      // Get metadata for all topics involved
+      Set<String> topics = tasks.stream()
+          .map(task -> task.proposal().topicPartition().topic())
+          .collect(Collectors.toSet());
+
+      LOG.info("KAFKA-19148 check: Fetching current metadata for {} topics: {}", topics.size(), topics);
+      // TODO: assess the impact of this on the performance
+      DescribeTopicsResult topicsResult = adminClient.describeTopics(topics);
+      Map<String, TopicDescription> topicDescriptions =
+          topicsResult.allTopicNames().get(30, TimeUnit.SECONDS);
+      LOG.info("KAFKA-19148 check: Successfully retrieved metadata for {} topics", topicDescriptions.size());
+
+      for (ExecutionTask task : tasks) {
+        TopicPartition tp = task.proposal().topicPartition();
+        TopicDescription topicDesc = topicDescriptions.get(tp.topic());
+
+        if (topicDesc == null) {
+          LOG.warn("KAFKA-19148 check: Topic {} not found, skipping task {} for partition {}",
+                   tp.topic(), task.executionId(), tp);
+          continue;
+        }
+
+        TopicPartitionInfo partitionInfo = topicDesc.partitions().get(tp.partition());
+
+        // Check if this movement would trigger KAFKA-19148
+        Node currentLeader = partitionInfo.leader();
+        if (currentLeader == null) {
+          LOG.info("KAFKA-19148 check: Partition {} has no leader, allowing task {} to proceed",
+                   tp, task.executionId());
+          safeTasks.add(task);
+          continue;
+        }
+
+        // Get current ISR
+        Set<Integer> currentIsrIds = partitionInfo.isr().stream()
+            .map(Node::id)
+            .collect(Collectors.toSet());
+
+        // Get proposed replica set
+        Set<Integer> proposedReplicaIds = task.proposal().newReplicas().stream()
+            .map(ReplicaPlacementInfo::brokerId)
+            .collect(Collectors.toSet());
+
+        LOG.info("KAFKA-19148 check: Validating task {} for partition {}: current leader={}, current ISR={}, proposed replicas={}",
+                 task.executionId(), tp, currentLeader.id(), currentIsrIds, proposedReplicaIds);
+
+        // Check if removing current leader
+        if (!proposedReplicaIds.contains(currentLeader.id())) {
+          LOG.info("KAFKA-19148 check: Task {} would remove current leader {} from partition {}",
+                   task.executionId(), currentLeader.id(), tp);
+          // Current leader being removed - check if ALL proposed replicas are in ISR
+          boolean allProposedReplicasInIsr = proposedReplicaIds.stream()
+              .allMatch(currentIsrIds::contains);
+
+          if (!allProposedReplicasInIsr) {
+            Set<Integer> nonIsrReplicas = proposedReplicaIds.stream()
+                .filter(id -> !currentIsrIds.contains(id))
+                .collect(Collectors.toSet());
+
+            LOG.warn("KAFKA-19148 EXECUTION-TIME BLOCKED: Skipping task {} for partition {} - " +
+                     "removing current leader {} while non-ISR replicas {} would remain in replica set. " +
+                     "Current ISR: {}, proposed replicas: {}",
+                     task.executionId(), tp, currentLeader.id(), nonIsrReplicas, currentIsrIds, proposedReplicaIds);
+            // Skip this task
+            continue;
+          }
+
+          LOG.info("KAFKA-19148 check: Task {} is safe - removing leader {} but all proposed replicas {} are in ISR",
+                   task.executionId(), currentLeader.id(), proposedReplicaIds);
+        } else {
+          LOG.info("KAFKA-19148 check: Task {} is safe - leader {} remains in proposed replica set",
+                   task.executionId(), currentLeader.id());
+        }
+
+        LOG.info("KAFKA-19148 execution-time check: Task {} for partition {} is SAFE to execute",
+                 task.executionId(), tp);
+        safeTasks.add(task);
+      }
+
+    } catch (Exception e) {
+      LOG.error("KAFKA-19148 check: CRITICAL ERROR validating {} tasks, blocking ALL tasks for safety. " +
+                "Tasks: {}, Error: {}", tasks.size(),
+                tasks.stream().map(t -> String.format("Task-%d:%s(%s)", t.executionId(), t.proposal().topicPartition(), t.state())).collect(Collectors.toList()),
+                e.getMessage(), e);
+      // In case of error, be conservative and block all tasks to prevent KAFKA-19148
+      return Collections.emptyList();
+    }
+
+    return safeTasks;
+  }
+
+  /**
    * Submits the given inter-broker replica reassignment tasks for execution using the given admin client.
+   *
+   * This method includes KAFKA-19148 safety checks to prevent unclean leader elections.
+   * All tasks are validated against current cluster state before submission.
    *
    * @param adminClient The adminClient to submit new inter-broker replica reassignments.
    * @param tasks Inter-broker replica reassignment tasks to execute.
@@ -447,9 +558,34 @@ public final class ExecutionUtils {
       throw new IllegalArgumentException("Tasks to execute cannot be empty.");
     }
 
+    // KAFKA-19148 protection: Filter out potentially unsafe tasks
+    LOG.info("KAFKA-19148 EXECUTION-TIME CHECK: Validating {} tasks for safety before submission", tasks.size());
+    for (ExecutionTask task : tasks) {
+      LOG.info("KAFKA-19148 EXECUTION-TIME CHECK: Validating task {} for partition {} (state: {}, proposal: {} -> {})",
+               task.executionId(), task.proposal().topicPartition(), task.state(),
+               task.proposal().oldReplicas().stream().map(r -> r.brokerId()).collect(Collectors.toList()),
+               task.proposal().newReplicas().stream().map(r -> r.brokerId()).collect(Collectors.toList()));
+    }
+
+    List<ExecutionTask> safeTasks = filterKafka19148UnsafeTasks(adminClient, tasks);
+    if (safeTasks.isEmpty()) {
+      LOG.error("KAFKA-19148 EXECUTION-TIME CHECK: ALL {} tasks were filtered out by safety check. Original tasks: {}",
+                tasks.size(), tasks.stream().map(t -> String.format("Task-%d:%s", t.executionId(), t.proposal().topicPartition())).collect(Collectors.toList()));
+      throw new IllegalArgumentException("All tasks were filtered out by KAFKA-19148 safety check.");
+    }
+
+    if (safeTasks.size() < tasks.size()) {
+      LOG.warn("KAFKA-19148 EXECUTION-TIME CHECK: Filtered out {} unsafe tasks out of {} total. Safe tasks: {}, Filtered tasks: {}",
+               tasks.size() - safeTasks.size(), tasks.size(),
+               safeTasks.stream().map(t -> String.format("Task-%d:%s", t.executionId(), t.proposal().topicPartition())).collect(Collectors.toList()),
+               tasks.stream().filter(t -> !safeTasks.contains(t)).map(t -> String.format("Task-%d:%s", t.executionId(), t.proposal().topicPartition())).collect(Collectors.toList()));
+    } else {
+      LOG.info("KAFKA-19148 EXECUTION-TIME CHECK: All {} tasks passed safety validation", tasks.size());
+    }
+
     // Update the ongoing replica reassignments in case the task status has changed.
     Map<TopicPartition, Optional<NewPartitionReassignment>> newReassignments = new HashMap<>();
-    for (ExecutionTask task : tasks) {
+    for (ExecutionTask task : safeTasks) {
       TopicPartition tp = task.proposal().topicPartition();
       List<Integer> newReplicas = new ArrayList<>(task.proposal().newReplicas().size());
       for (ReplicaPlacementInfo replicaPlacementInfo : task.proposal().newReplicas()) {
@@ -472,6 +608,8 @@ public final class ExecutionUtils {
           // Likewise, no need to check if there is already an ongoing execution for the partition, because if one
           // exists, it will be modified to execute the desired task.
           newReassignments.put(tp, reassignmentValue(newReplicas));
+          LOG.info("Submitting IN_PROGRESS task {} for execution: partition={}, newReplicas={}",
+                   task.executionId(), tp, newReplicas);
           LOG.debug("Task {} will be executed.", task);
           break;
         default:
