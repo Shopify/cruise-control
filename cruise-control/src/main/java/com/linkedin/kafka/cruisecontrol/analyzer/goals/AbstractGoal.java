@@ -149,8 +149,17 @@ public abstract class AbstractGoal implements Goal {
         return true;
       }
 
-      // We're moving the current leader - determine the new replica set after the move
-      // Use the current replica set from Kafka metadata, not the cluster model
+      // Special case: Single-replica partitions
+      if (currentReplicaIds.size() == 1) {
+        // Moving a single-replica partition means removing the current leader with no other replicas
+        // This is exactly the KAFKA-19148 scenario we need to prevent
+        LOG.warn("KAFKA-19148 BLOCKED: Cannot move single-replica partition {} - would remove current leader {} " +
+                 "with no other replicas. Should first add replica to destination broker {}",
+                 topicPartition, currentLeader.id(), destinationBroker.id());
+        return false;
+      }
+
+      // Multi-replica case: determine the new replica set after the move
       Set<Integer> newReplicaIds = new HashSet<>(currentReplicaIds);
       // Remove the source broker
       newReplicaIds.remove(replica.broker().id());

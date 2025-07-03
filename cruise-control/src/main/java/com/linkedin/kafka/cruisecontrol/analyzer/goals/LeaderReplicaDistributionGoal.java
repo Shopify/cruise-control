@@ -217,7 +217,8 @@ public class LeaderReplicaDistributionGoal extends ReplicaDistributionAbstractGo
     Set<Broker> candidateBrokers = Collections.singleton(broker);
     Set<String> excludedTopics = optimizationOptions.excludedTopics();
     boolean fastMode = optimizationOptions.fastMode();
-    for (Replica replica : broker.replicas()) {
+    // Create a copy to avoid ConcurrentModificationException when the collection is modified during iteration
+    for (Replica replica : new HashSet<>(broker.replicas())) {
       if (fastMode && remainingTimeMs(_balancingConstraint.fastModePerBrokerMoveTimeoutMs(), moveStartTimeMs) <= 0) {
         LOG.debug("Move leadership in timeout in fast mode for broker {}.", broker.id());
         break;
