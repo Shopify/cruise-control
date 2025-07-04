@@ -123,7 +123,7 @@ public abstract class AbstractGoal implements Goal {
       // Get current state from Kafka metadata
       Node currentLeader = partitionInfo.leader();
       if (currentLeader == null) {
-        LOG.info("KAFKA-19148 check: Partition {} has no leader, allowing move", topicPartition);
+        LOG.debug("KAFKA-19148 check: Partition {} has no leader, allowing move", topicPartition);
         return true;
       }
 
@@ -137,15 +137,15 @@ public abstract class AbstractGoal implements Goal {
           .collect(Collectors.toSet());
 
       // Log current state for debugging
-      LOG.info("KAFKA-19148 check for {}: current leader={}, replicas={}, ISR={}, " +
-               "moving replica from broker {} to broker {}",
-               topicPartition, currentLeader.id(), currentReplicaIds, currentIsrIds,
-               replica.broker().id(), destinationBroker.id());
+      LOG.debug("KAFKA-19148 check for {}: current leader={}, replicas={}, ISR={}, " +
+                "moving replica from broker {} to broker {}",
+                topicPartition, currentLeader.id(), currentReplicaIds, currentIsrIds,
+                replica.broker().id(), destinationBroker.id());
 
       // Check if we're moving the current leader
       boolean movingCurrentLeader = currentLeader.id() == replica.broker().id();
       if (!movingCurrentLeader) {
-        LOG.info("KAFKA-19148 check: Not moving current leader for {}, move is safe", topicPartition);
+        LOG.debug("KAFKA-19148 check: Not moving current leader for {}, move is safe", topicPartition);
         return true;
       }
 
@@ -185,8 +185,8 @@ public abstract class AbstractGoal implements Goal {
           return false;
         }
 
-        LOG.info("KAFKA-19148 check: Leader removal for {} is safe - all remaining replicas {} are in ISR {}",
-                 topicPartition, newReplicaIds, currentIsrIds);
+        LOG.debug("KAFKA-19148 check: Leader removal for {} is safe - all remaining replicas {} are in ISR {}",
+                  topicPartition, newReplicaIds, currentIsrIds);
       } else {
         // Moving leader within the replica set - check if destination is in ISR
         if (!currentIsrIds.contains(destinationBroker.id())) {
@@ -196,8 +196,8 @@ public abstract class AbstractGoal implements Goal {
           return false;
         }
 
-        LOG.info("KAFKA-19148 check: Leader movement for {} is safe - destination {} is in ISR",
-                 topicPartition, destinationBroker.id());
+        LOG.debug("KAFKA-19148 check: Leader movement for {} is safe - destination {} is in ISR",
+                  topicPartition, destinationBroker.id());
       }
 
     } catch (Exception e) {
@@ -404,8 +404,8 @@ public abstract class AbstractGoal implements Goal {
       if (acceptance == ACCEPT) {
         // Log when we're applying the move
         if (action == ActionType.INTER_BROKER_REPLICA_MOVEMENT || action == ActionType.INTER_BROKER_REPLICA_SWAP || action == ActionType.LEADERSHIP_MOVEMENT) {
-          LOG.info("Applying {} for partition {}: moving replica from broker {} to broker {}",
-                   action, replica.topicPartition(), replica.broker().id(), broker.id());
+          LOG.debug("Applying {} for partition {}: moving replica from broker {} to broker {}",
+                    action, replica.topicPartition(), replica.broker().id(), broker.id());
         }
         if (action == ActionType.LEADERSHIP_MOVEMENT) {
           clusterModel.relocateLeadership(replica.topicPartition(), replica.broker().id(), broker.id());
