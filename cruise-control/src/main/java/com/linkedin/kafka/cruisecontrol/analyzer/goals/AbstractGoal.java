@@ -60,6 +60,8 @@ public abstract class AbstractGoal implements Goal {
   protected double _minMonitoredPartitionPercentage;
   protected ProvisionResponse _provisionResponse;
   protected Cluster _kafkaCluster;
+  // Track which KAFKA-19148 blocks have been logged to avoid spammy logs
+  private final Set<String> _loggedKafka19148Blocks = new HashSet<>();
 
   /**
    * Constructor of Abstract Goal class sets the
@@ -90,6 +92,8 @@ public abstract class AbstractGoal implements Goal {
    */
   public void setKafkaCluster(Cluster kafkaCluster) {
     _kafkaCluster = kafkaCluster;
+    // Clear logged blocks when cluster metadata is refreshed for a new optimization run
+    _loggedKafka19148Blocks.clear();
   }
 
   /**
@@ -116,7 +120,10 @@ public abstract class AbstractGoal implements Goal {
     try {
       PartitionInfo partitionInfo = _kafkaCluster.partition(topicPartition);
       if (partitionInfo == null) {
-        LOG.warn("KAFKA-19148 check: Partition {} does not exist in Kafka metadata, skipping move", topicPartition);
+        String blockKey = String.format("NO_METADATA:%s", topicPartition);
+        if (_loggedKafka19148Blocks.add(blockKey)) {
+          LOG.warn("KAFKA-19148 check: Partition {} does not exist in Kafka metadata, skipping move", topicPartition);
+        }
         return false;
       }
 
@@ -153,9 +160,12 @@ public abstract class AbstractGoal implements Goal {
       if (currentReplicaIds.size() == 1) {
         // Moving a single-replica partition means removing the current leader with no other replicas
         // This is exactly the KAFKA-19148 scenario we need to prevent
-        LOG.warn("KAFKA-19148 BLOCKED: Cannot move single-replica partition {} - would remove current leader {} " +
-                 "with no other replicas. Should first add replica to destination broker {}",
-                 topicPartition, currentLeader.id(), destinationBroker.id());
+        String blockKey = String.format("SINGLE_REPLICA:%s:%d->%d", topicPartition, currentLeader.id(), destinationBroker.id());
+        if (_loggedKafka19148Blocks.add(blockKey)) {
+          LOG.warn("KAFKA-19148 BLOCKED: Cannot move single-replica partition {} - would remove current leader {} " +
+                   "with no other replicas. Should first add replica to destination broker {}",
+                   topicPartition, currentLeader.id(), destinationBroker.id());
+        }
         return false;
       }
 
@@ -179,9 +189,13 @@ public abstract class AbstractGoal implements Goal {
               .filter(id -> !currentIsrIds.contains(id))
               .collect(Collectors.toSet());
 
-          LOG.warn("KAFKA-19148 BLOCKED: Skipping movement for partition {} - removing current leader {} " +
-                   "while non-ISR replicas {} would remain in replica set. Current ISR: {}",
-                   topicPartition, currentLeader.id(), nonIsrReplicas, currentIsrIds);
+          String blockKey = String.format("LEADER_REMOVAL_NON_ISR:%s:%d:non-isr%s",
+                                          topicPartition, currentLeader.id(), nonIsrReplicas);
+          if (_loggedKafka19148Blocks.add(blockKey)) {
+            LOG.warn("KAFKA-19148 BLOCKED: Skipping movement for partition {} - removing current leader {} " +
+                     "while non-ISR replicas {} would remain in replica set. Current ISR: {}",
+                     topicPartition, currentLeader.id(), nonIsrReplicas, currentIsrIds);
+          }
           return false;
         }
 
@@ -190,9 +204,13 @@ public abstract class AbstractGoal implements Goal {
       } else {
         // Moving leader within the replica set - check if destination is in ISR
         if (!currentIsrIds.contains(destinationBroker.id())) {
-          LOG.warn("KAFKA-19148 BLOCKED: Skipping movement for partition {} - moving leader {} to " +
-                   "out-of-sync broker {}. Current ISR: {}",
-                   topicPartition, currentLeader.id(), destinationBroker.id(), currentIsrIds);
+          String blockKey = String.format("LEADER_TO_NON_ISR:%s:%d->%d",
+                                          topicPartition, currentLeader.id(), destinationBroker.id());
+          if (_loggedKafka19148Blocks.add(blockKey)) {
+            LOG.warn("KAFKA-19148 BLOCKED: Skipping movement for partition {} - moving leader {} to " +
+                     "out-of-sync broker {}. Current ISR: {}",
+                     topicPartition, currentLeader.id(), destinationBroker.id(), currentIsrIds);
+          }
           return false;
         }
 
@@ -240,6 +258,11 @@ public abstract class AbstractGoal implements Goal {
       LOG.trace("[POST - {}] {}", name(), statsAfterOptimization);
       if (LOG.isDebugEnabled()) {
         LOG.debug("Finished optimization for {} in {}ms.", name(), System.currentTimeMillis() - goalStartTime);
+      }
+      // Log KAFKA-19148 block summary if any movements were blocked
+      if (!_loggedKafka19148Blocks.isEmpty()) {
+        LOG.info("KAFKA-19148 summary for goal {}: {} unique movements were blocked to prevent unclean leader elections",
+                 name(), _loggedKafka19148Blocks.size());
       }
       LOG.trace("Cluster after optimization is {}", clusterModel);
       // The optimization cannot make stats worse unless the cluster has (1) broken brokers or (2) excluded brokers for replica move with replicas.
