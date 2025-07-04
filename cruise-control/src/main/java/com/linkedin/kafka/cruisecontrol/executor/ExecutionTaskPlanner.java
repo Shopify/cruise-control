@@ -200,8 +200,8 @@ public class ExecutionTaskPlanner {
             .map(ReplicaPlacementInfo::brokerId)
             .collect(Collectors.toSet());
 
-        LOG.debug("Evaluating proposal for partition {}: current replicas={}, ISR={}, leader={}, " +
-                  "proposal: {} -> {}, oldLeader={}, newLeader={}",
+        LOG.debug("Evaluating proposal for partition {}: current replicas={}, ISR={}, leader={}, "
+                  + "proposal: {} -> {}, oldLeader={}, newLeader={}",
                   tp, currentReplicas, currentIsr,
                   partitionInfo.leader() != null ? partitionInfo.leader().id() : "null",
                   proposal.oldReplicas().stream().map(ReplicaPlacementInfo::brokerId).collect(Collectors.toList()),
@@ -212,8 +212,8 @@ public class ExecutionTaskPlanner {
 
       // KAFKA-19148 validation: Check if the proposal would cause unclean leader election
       if (wouldCauseUncleanLeaderElection(proposal, partitionInfo)) {
-        LOG.warn("Skipping proposal for partition {} to prevent KAFKA-19148: moving leader {} to broker {} " +
-                 "which would cause unclean election. Current replicas: {}, ISR: {}",
+        LOG.warn("Skipping proposal for partition {} to prevent KAFKA-19148: moving leader {} to broker {} "
+                 + "which would cause unclean election. Current replicas: {}, ISR: {}",
                  tp, proposal.oldLeader().brokerId(), proposal.newLeader().brokerId(),
                  Arrays.stream(partitionInfo.replicas()).map(Node::id).collect(Collectors.toList()),
                  Arrays.stream(partitionInfo.inSyncReplicas()).map(Node::id).collect(Collectors.toList()));
@@ -227,8 +227,8 @@ public class ExecutionTaskPlanner {
         ExecutionTask executionTask = new ExecutionTask(replicaActionExecutionId, proposal, INTER_BROKER_REPLICA_ACTION,
                                                         executionAlertingThresholdMs);
         _remainingInterBrokerReplicaMovements.add(executionTask);
-        LOG.debug("KAFKA-19148 TASK CREATION: Created INTER_BROKER_REPLICA_ACTION task {} for partition {} with proposal: {} -> {}, " +
-                  "oldLeader={}, newLeader={}, current cluster state - leader={}, ISR={}, replicas={}",
+        LOG.debug("KAFKA-19148 TASK CREATION: Created INTER_BROKER_REPLICA_ACTION task {} for partition {} with proposal: {} -> {}, "
+                  + "oldLeader={}, newLeader={}, current cluster state - leader={}, ISR={}, replicas={}",
                   replicaActionExecutionId, proposal.topicPartition(),
                   proposal.oldReplicas().stream().map(ReplicaPlacementInfo::brokerId).collect(Collectors.toList()),
                   proposal.newReplicas().stream().map(ReplicaPlacementInfo::brokerId).collect(Collectors.toList()),
@@ -281,8 +281,8 @@ public class ExecutionTaskPlanner {
         .collect(Collectors.toSet());
 
     // Log the check details
-    LOG.debug("KAFKA-19148 check for partition {}: current leader={}, current ISR={}, " +
-              "proposed replicas={}, old replicas={}",
+    LOG.debug("KAFKA-19148 check for partition {}: current leader={}, current ISR={}, "
+              + "proposed replicas={}, old replicas={}",
               proposal.topicPartition(), currentLeader, currentIsr, proposedReplicas,
               proposal.oldReplicas().stream().map(ReplicaPlacementInfo::brokerId).collect(Collectors.toList()));
 
@@ -297,30 +297,33 @@ public class ExecutionTaskPlanner {
             .filter(replica -> !currentIsr.contains(replica))
             .collect(Collectors.toSet());
 
-        LOG.warn("KAFKA-19148 BLOCKED: Skipping proposal for partition {} - removing current leader {} " +
-                 "while non-ISR replicas {} would remain in replica set. Current ISR: {}",
+        LOG.warn("KAFKA-19148 BLOCKED: Skipping proposal for partition {} - removing current leader {} "
+                 + "while non-ISR replicas {} would remain in replica set. Current ISR: {}",
                  proposal.topicPartition(), currentLeader, nonIsrReplicas, currentIsr);
-        return true; // Would cause unclean election
+        // Would cause unclean election
+        return true;
       }
 
-      LOG.debug("KAFKA-19148 check: Proposal for partition {} is safe - removing leader {} " +
-                "and all remaining replicas {} are in ISR",
+      LOG.debug("KAFKA-19148 check: Proposal for partition {} is safe - removing leader {} "
+                + "and all remaining replicas {} are in ISR",
                 proposal.topicPartition(), currentLeader, proposedReplicas);
     } else {
       // Leader not being removed - check if new leader would be in ISR
-      if (proposal.newLeader().brokerId() != currentLeader &&
-          !currentIsr.contains(proposal.newLeader().brokerId())) {
-        LOG.warn("KAFKA-19148 BLOCKED: Skipping proposal for partition {} - new leader {} is not in ISR. " +
-                 "Current leader: {}, current ISR: {}",
+      if (proposal.newLeader().brokerId() != currentLeader
+          && !currentIsr.contains(proposal.newLeader().brokerId())) {
+        LOG.warn("KAFKA-19148 BLOCKED: Skipping proposal for partition {} - new leader {} is not in ISR. "
+                 + "Current leader: {}, current ISR: {}",
                  proposal.topicPartition(), proposal.newLeader().brokerId(), currentLeader, currentIsr);
-        return true; // Would cause unclean election
+        // Would cause unclean election
+        return true;
       }
 
       LOG.debug("KAFKA-19148 check: Proposal for partition {} is safe - leader remains or new leader is in ISR",
                 proposal.topicPartition());
     }
 
-    return false; // Safe to proceed
+    // Safe to proceed
+    return false;
   }
 
   /**
@@ -384,8 +387,8 @@ public class ExecutionTaskPlanner {
           long leaderActionExecutionId = _executionId++;
           ExecutionTask leaderActionTask = new ExecutionTask(leaderActionExecutionId, proposal, LEADER_ACTION, _taskExecutionAlertingThresholdMs);
           _remainingLeadershipMovements.put(leaderActionExecutionId, leaderActionTask);
-          LOG.debug("KAFKA-19148 TASK CREATION: Created LEADER_ACTION task {} for partition {} moving leadership from {} to {}, " +
-                    "current cluster state - leader={}, ISR={}, replicas={}",
+          LOG.debug("KAFKA-19148 TASK CREATION: Created LEADER_ACTION task {} for partition {} moving leadership from {} to {}, "
+                    + "current cluster state - leader={}, ISR={}, replicas={}",
                     leaderActionExecutionId, proposal.topicPartition(), currentLeader.id(), proposal.newLeader().brokerId(),
                     currentLeader.id(),
                     Arrays.stream(cluster.partition(proposal.topicPartition()).inSyncReplicas()).map(Node::id).collect(Collectors.toList()),

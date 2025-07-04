@@ -16,13 +16,10 @@ import com.linkedin.kafka.cruisecontrol.analyzer.ProvisionStatus;
 import com.linkedin.kafka.cruisecontrol.config.KafkaCruiseControlConfig;
 import com.linkedin.kafka.cruisecontrol.config.constants.MonitorConfig;
 import com.linkedin.kafka.cruisecontrol.exception.OptimizationFailureException;
-import com.linkedin.kafka.cruisecontrol.exception.PartitionNotExistsException;
-import com.linkedin.kafka.cruisecontrol.KafkaCruiseControlUtils;
 import com.linkedin.kafka.cruisecontrol.model.Broker;
 import com.linkedin.kafka.cruisecontrol.model.ClusterModel;
 import com.linkedin.kafka.cruisecontrol.model.ClusterModelStats;
 import com.linkedin.kafka.cruisecontrol.model.Disk;
-import com.linkedin.kafka.cruisecontrol.model.Partition;
 import com.linkedin.kafka.cruisecontrol.model.Replica;
 import java.util.Arrays;
 import java.util.List;
@@ -109,9 +106,9 @@ public abstract class AbstractGoal implements Goal {
    */
   private boolean isReplicaMoveSafeForKRaft(ClusterModel clusterModel, Replica replica, Broker destinationBroker, ActionType action) {
     // Only check inter-broker movements that could affect ISR
-    if (_kafkaCluster == null ||
-        (action != ActionType.INTER_BROKER_REPLICA_MOVEMENT &&
-         action != ActionType.INTER_BROKER_REPLICA_SWAP)) {
+    if (_kafkaCluster == null
+        || (action != ActionType.INTER_BROKER_REPLICA_MOVEMENT
+            && action != ActionType.INTER_BROKER_REPLICA_SWAP)) {
       return true;
     }
 
@@ -144,8 +141,8 @@ public abstract class AbstractGoal implements Goal {
           .collect(Collectors.toSet());
 
       // Log current state for debugging
-      LOG.debug("KAFKA-19148 check for {}: current leader={}, replicas={}, ISR={}, " +
-                "moving replica from broker {} to broker {}",
+      LOG.debug("KAFKA-19148 check for {}: current leader={}, replicas={}, ISR={}, "
+                + "moving replica from broker {} to broker {}",
                 topicPartition, currentLeader.id(), currentReplicaIds, currentIsrIds,
                 replica.broker().id(), destinationBroker.id());
 
@@ -162,8 +159,8 @@ public abstract class AbstractGoal implements Goal {
         // This is exactly the KAFKA-19148 scenario we need to prevent
         String blockKey = String.format("SINGLE_REPLICA:%s:%d->%d", topicPartition, currentLeader.id(), destinationBroker.id());
         if (_loggedKafka19148Blocks.add(blockKey)) {
-          LOG.warn("KAFKA-19148 BLOCKED: Cannot move single-replica partition {} - would remove current leader {} " +
-                   "with no other replicas. Should first add replica to destination broker {}",
+          LOG.warn("KAFKA-19148 BLOCKED: Cannot move single-replica partition {} - would remove current leader {} "
+                   + "with no other replicas. Should first add replica to destination broker {}",
                    topicPartition, currentLeader.id(), destinationBroker.id());
         }
         return false;
@@ -192,8 +189,8 @@ public abstract class AbstractGoal implements Goal {
           String blockKey = String.format("LEADER_REMOVAL_NON_ISR:%s:%d:non-isr%s",
                                           topicPartition, currentLeader.id(), nonIsrReplicas);
           if (_loggedKafka19148Blocks.add(blockKey)) {
-            LOG.warn("KAFKA-19148 BLOCKED: Skipping movement for partition {} - removing current leader {} " +
-                     "while non-ISR replicas {} would remain in replica set. Current ISR: {}",
+            LOG.warn("KAFKA-19148 BLOCKED: Skipping movement for partition {} - removing current leader {} "
+                     + "while non-ISR replicas {} would remain in replica set. Current ISR: {}",
                      topicPartition, currentLeader.id(), nonIsrReplicas, currentIsrIds);
           }
           return false;
@@ -207,8 +204,8 @@ public abstract class AbstractGoal implements Goal {
           String blockKey = String.format("LEADER_TO_NON_ISR:%s:%d->%d",
                                           topicPartition, currentLeader.id(), destinationBroker.id());
           if (_loggedKafka19148Blocks.add(blockKey)) {
-            LOG.warn("KAFKA-19148 BLOCKED: Skipping movement for partition {} - moving leader {} to " +
-                     "out-of-sync broker {}. Current ISR: {}",
+            LOG.warn("KAFKA-19148 BLOCKED: Skipping movement for partition {} - moving leader {} to "
+                     + "out-of-sync broker {}. Current ISR: {}",
                      topicPartition, currentLeader.id(), destinationBroker.id(), currentIsrIds);
           }
           return false;
@@ -426,7 +423,9 @@ public abstract class AbstractGoal implements Goal {
                 proposal, replica.topicPartition(), acceptance);
       if (acceptance == ACCEPT) {
         // Log when we're applying the move
-        if (action == ActionType.INTER_BROKER_REPLICA_MOVEMENT || action == ActionType.INTER_BROKER_REPLICA_SWAP || action == ActionType.LEADERSHIP_MOVEMENT) {
+        if (action == ActionType.INTER_BROKER_REPLICA_MOVEMENT
+            || action == ActionType.INTER_BROKER_REPLICA_SWAP
+            || action == ActionType.LEADERSHIP_MOVEMENT) {
           LOG.debug("Applying {} for partition {}: moving replica from broker {} to broker {}",
                     action, replica.topicPartition(), replica.broker().id(), broker.id());
         }
