@@ -621,9 +621,11 @@ public final class ExecutionUtils {
 
     List<ExecutionTask> safeTasks = filterKafka19148UnsafeTasks(adminClient, tasks);
     if (safeTasks.isEmpty()) {
-      LOG.error("KAFKA-19148 EXECUTION-TIME CHECK: ALL {} tasks were filtered out by safety check. Original tasks: {}",
+      LOG.warn("KAFKA-19148 EXECUTION-TIME CHECK: ALL {} tasks were filtered out by safety check. Original tasks: {}. " +
+               "Returning empty result - no tasks will be executed.",
                 tasks.size(), tasks.stream().map(t -> String.format("Task-%d:%s", t.executionId(), t.proposal().topicPartition())).collect(Collectors.toList()));
-      throw new IllegalArgumentException("All tasks were filtered out by KAFKA-19148 safety check.");
+      // Return an empty result instead of throwing exception - this allows execution to complete gracefully
+      return adminClient.alterPartitionReassignments(Collections.emptyMap());
     }
 
     if (safeTasks.size() < tasks.size()) {
