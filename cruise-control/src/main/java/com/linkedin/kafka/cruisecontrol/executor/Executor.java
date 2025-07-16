@@ -2206,14 +2206,27 @@ public class Executor {
 
         // KAFKA-19148 CRITICAL FIX: Re-validate tasks against current cluster state before re-execution
         List<ExecutionTask> safeTasksForReexecution = validateTasksForKafka19148(tasksToReexecute);
-        if (safeTasksForReexecution.isEmpty()) {
-          LOG.warn("KAFKA-19148 SAFETY: All {} re-execution tasks were blocked by safety check", tasksToReexecute.size());
-          return;
-        }
-
+        
+        // Mark unsafe tasks as DEAD to prevent infinite re-execution loops
         if (safeTasksForReexecution.size() < tasksToReexecute.size()) {
-          LOG.warn("KAFKA-19148 SAFETY: Filtered out {} unsafe re-execution tasks out of {} total",
-                   tasksToReexecute.size() - safeTasksForReexecution.size(), tasksToReexecute.size());
+          Set<ExecutionTask> unsafeTasks = new HashSet<>(tasksToReexecute);
+          unsafeTasks.removeAll(safeTasksForReexecution);
+          for (ExecutionTask unsafeTask : unsafeTasks) {
+            LOG.warn("KAFKA-19148 SAFETY: Marking task {} as DEAD to prevent re-execution loop. "
+                     + "Partition: {}, Move: {} -> {}",
+                     unsafeTask.executionId(), unsafeTask.proposal().topicPartition(),
+                     unsafeTask.proposal().oldReplicas().stream().map(r -> r.brokerId()).collect(Collectors.toList()),
+                     unsafeTask.proposal().newReplicas().stream().map(r -> r.brokerId()).collect(Collectors.toList()));
+            _executionTaskManager.markTaskDead(unsafeTask);
+          }
+          LOG.warn("KAFKA-19148 SAFETY: Marked {} unsafe tasks as DEAD out of {} total re-execution tasks",
+                   unsafeTasks.size(), tasksToReexecute.size());
+        }
+        
+        if (safeTasksForReexecution.isEmpty()) {
+          LOG.warn("KAFKA-19148 SAFETY: All {} re-execution tasks were blocked by safety check and marked as DEAD", 
+                   tasksToReexecute.size());
+          return;
         }
 
         AlterPartitionReassignmentsResult result = ExecutionUtils.submitReplicaReassignmentTasks(_adminClient, safeTasksForReexecution);
