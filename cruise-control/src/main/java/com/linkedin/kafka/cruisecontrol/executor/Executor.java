@@ -1641,7 +1641,8 @@ public class Executor {
           LOG.debug("KAFKA-19148 EXECUTION: Submitting {} tasks to ExecutionUtils.submitReplicaReassignmentTasks. "
                    + "Tasks will undergo final KAFKA-19148 safety validation.", tasksToExecute.size());
           List<ExecutionTask> tasksToMarkComplete = new ArrayList<>();
-          result = ExecutionUtils.submitReplicaReassignmentTasks(_adminClient, tasksToExecute, tasksToMarkComplete);
+          List<ExecutionTask> tasksToMarkDead = new ArrayList<>();
+          result = ExecutionUtils.submitReplicaReassignmentTasks(_adminClient, tasksToExecute, tasksToMarkComplete, tasksToMarkDead);
 
           // Mark any tasks that are already complete (replica ordering mismatch)
           if (!tasksToMarkComplete.isEmpty()) {
@@ -1650,6 +1651,17 @@ public class Executor {
             for (ExecutionTask task : tasksToMarkComplete) {
               _executionTaskManager.markTaskDone(task);
               LOG.debug("KAFKA-19148: Marked task {} for partition {} as complete",
+                        task.executionId(), task.proposal().topicPartition());
+            }
+          }
+          
+          // Mark any unsafe tasks as DEAD to prevent stuck rebalances
+          if (!tasksToMarkDead.isEmpty()) {
+            LOG.info("KAFKA-19148: Marking {} unsafe tasks as DEAD to prevent unclean leader election",
+                     tasksToMarkDead.size());
+            for (ExecutionTask task : tasksToMarkDead) {
+              _executionTaskManager.markTaskDead(task);
+              LOG.debug("KAFKA-19148: Marked task {} for partition {} as DEAD (would cause unclean leader election)",
                         task.executionId(), task.proposal().topicPartition());
             }
           }
@@ -2242,7 +2254,8 @@ public class Executor {
         }
 
         List<ExecutionTask> tasksToMarkComplete = new ArrayList<>();
-        AlterPartitionReassignmentsResult result = ExecutionUtils.submitReplicaReassignmentTasks(_adminClient, safeTasksForReexecution, tasksToMarkComplete);
+        // Note: We don't need tasksToMarkDead here because unsafe tasks are already marked as DEAD above
+        AlterPartitionReassignmentsResult result = ExecutionUtils.submitReplicaReassignmentTasks(_adminClient, safeTasksForReexecution, tasksToMarkComplete, null);
         
         // Mark any tasks that are already complete (replica ordering mismatch)
         if (!tasksToMarkComplete.isEmpty()) {

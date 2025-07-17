@@ -642,7 +642,7 @@ public final class ExecutionUtils {
    */
   public static AlterPartitionReassignmentsResult submitReplicaReassignmentTasks(AdminClient adminClient,
                                                                                  List<ExecutionTask> tasks) {
-    return submitReplicaReassignmentTasks(adminClient, tasks, null);
+    return submitReplicaReassignmentTasks(adminClient, tasks, null, null);
   }
 
   /**
@@ -654,11 +654,13 @@ public final class ExecutionUtils {
    * @param adminClient The adminClient to submit new inter-broker replica reassignments.
    * @param tasks Inter-broker replica reassignment tasks to execute.
    * @param tasksToMarkComplete Optional list to populate with tasks that should be marked as complete.
+   * @param tasksToMarkDead Optional list to populate with tasks that should be marked as dead (unsafe).
    * @return The {@link AlterPartitionReassignmentsResult result} of reassignment request -- cannot be {@code null}.
    */
   public static AlterPartitionReassignmentsResult submitReplicaReassignmentTasks(AdminClient adminClient,
                                                                                  List<ExecutionTask> tasks,
-                                                                                 List<ExecutionTask> tasksToMarkComplete) {
+                                                                                 List<ExecutionTask> tasksToMarkComplete,
+                                                                                 List<ExecutionTask> tasksToMarkDead) {
     if (validateNotNull(tasks, "Tasks to execute cannot be null.").isEmpty()) {
       throw new IllegalArgumentException("Tasks to execute cannot be empty.");
     }
@@ -689,9 +691,25 @@ public final class ExecutionUtils {
                    t.proposal().topicPartition())).collect(Collectors.toList()));
     }
     
+    // Identify unsafe tasks that should be marked as DEAD
+    if (safeTasks.size() < tasks.size() || !completedTasks.isEmpty()) {
+      Set<ExecutionTask> unsafeTasks = new HashSet<>(tasks);
+      unsafeTasks.removeAll(safeTasks);
+      unsafeTasks.removeAll(completedTasks); // Don't mark completed ones as DEAD
+      
+      if (!unsafeTasks.isEmpty() && tasksToMarkDead != null) {
+        tasksToMarkDead.addAll(unsafeTasks);
+        LOG.info("KAFKA-19148 EXECUTION-TIME CHECK: {} tasks are unsafe (would cause unclean leader election). "
+                 + "These will be marked as DEAD: {}",
+                 unsafeTasks.size(),
+                 unsafeTasks.stream().map(t -> String.format("Task-%d:%s", t.executionId(),
+                     t.proposal().topicPartition())).collect(Collectors.toList()));
+      }
+    }
+    
     if (safeTasks.isEmpty()) {
       LOG.warn("KAFKA-19148 EXECUTION-TIME CHECK: ALL {} tasks were filtered out by safety check. "
-               + "{} marked as complete, {} blocked. Original tasks: {}. "
+               + "{} marked as complete, {} marked as dead. Original tasks: {}. "
                + "Returning empty result - no new tasks will be executed.",
                 tasks.size(), completedTasks.size(), tasks.size() - completedTasks.size(),
                 tasks.stream().map(t -> String.format("Task-%d:%s", t.executionId(),
