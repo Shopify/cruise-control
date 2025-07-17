@@ -441,19 +441,41 @@ public final class ExecutionUtils {
   }
 
   /**
+   * Result of filtering tasks for KAFKA-19148 safety.
+   */
+  static class Kafka19148FilterResult {
+    private final List<ExecutionTask> safeTasks;
+    private final List<ExecutionTask> completedTasks;
+
+    Kafka19148FilterResult(List<ExecutionTask> safeTasks, List<ExecutionTask> completedTasks) {
+      this.safeTasks = safeTasks;
+      this.completedTasks = completedTasks;
+    }
+
+    List<ExecutionTask> getSafeTasks() {
+      return safeTasks;
+    }
+
+    List<ExecutionTask> getCompletedTasks() {
+      return completedTasks;
+    }
+  }
+
+  /**
    * Filters out KAFKA-19148 unsafe tasks from the given list of tasks.
    *
    * @param adminClient The admin client to use for fetching cluster metadata.
    * @param tasks The list of tasks to filter.
-   * @return The list of safe tasks that can be executed.
+   * @return The filtering result containing safe tasks to execute and completed tasks.
    */
-  private static List<ExecutionTask> filterKafka19148UnsafeTasks(AdminClient adminClient,
-                                                                  List<ExecutionTask> tasks) {
+  static Kafka19148FilterResult filterKafka19148UnsafeTasks(AdminClient adminClient,
+                                                             List<ExecutionTask> tasks) {
     if (tasks.isEmpty()) {
-      return tasks;
+      return new Kafka19148FilterResult(tasks, Collections.emptyList());
     }
 
     List<ExecutionTask> safeTasks = new ArrayList<>();
+    List<ExecutionTask> completedTasks = new ArrayList<>();
 
     try {
       // Get current cluster metadata for all topics involved
@@ -502,11 +524,12 @@ public final class ExecutionUtils {
         // Check if this task is already complete but stuck due to replica ordering
         if (isTaskEffectivelyComplete(task, partitionInfo)) {
           LOG.warn("KAFKA-19148 REPLICA-ORDER-MISMATCH: Task {} for partition {} appears complete but stuck due to replica ordering. "
-                   + "Expected order: {}, Actual order: {}. Skipping to prevent stuck execution.",
+                   + "Expected order: {}, Actual order: {}. Marking as complete to prevent stuck execution.",
                    task.executionId(), tp,
                    task.proposal().newReplicas().stream().map(r -> r.brokerId()).collect(Collectors.toList()),
                    partitionInfo.replicas().stream().map(Node::id).collect(Collectors.toList()));
-          // Skip this task as it's effectively complete
+          // Mark this task as complete
+          completedTasks.add(task);
           continue;
         }
 
@@ -567,13 +590,13 @@ public final class ExecutionUtils {
                     t.proposal().topicPartition(), t.state())).collect(Collectors.toList()),
                 e.getMessage(), e);
       // In case of error, be conservative and block all tasks to prevent KAFKA-19148
-      return Collections.emptyList();
+      return new Kafka19148FilterResult(Collections.emptyList(), Collections.emptyList());
     }
 
-    LOG.debug("KAFKA-19148 EXECUTION-TIME CHECK: {} of {} tasks passed safety validation",
-              safeTasks.size(), tasks.size());
+    LOG.debug("KAFKA-19148 EXECUTION-TIME CHECK: {} of {} tasks passed safety validation, {} marked as complete",
+              safeTasks.size(), tasks.size(), completedTasks.size());
 
-    return safeTasks;
+    return new Kafka19148FilterResult(safeTasks, completedTasks);
   }
 
   /**
@@ -619,6 +642,23 @@ public final class ExecutionUtils {
    */
   public static AlterPartitionReassignmentsResult submitReplicaReassignmentTasks(AdminClient adminClient,
                                                                                  List<ExecutionTask> tasks) {
+    return submitReplicaReassignmentTasks(adminClient, tasks, null);
+  }
+
+  /**
+   * Submits the given inter-broker replica reassignment tasks for execution using the given admin client.
+   *
+   * This method includes KAFKA-19148 safety checks to prevent unclean leader elections.
+   * All tasks are validated against current cluster state before submission.
+   *
+   * @param adminClient The adminClient to submit new inter-broker replica reassignments.
+   * @param tasks Inter-broker replica reassignment tasks to execute.
+   * @param tasksToMarkComplete Optional list to populate with tasks that should be marked as complete.
+   * @return The {@link AlterPartitionReassignmentsResult result} of reassignment request -- cannot be {@code null}.
+   */
+  public static AlterPartitionReassignmentsResult submitReplicaReassignmentTasks(AdminClient adminClient,
+                                                                                 List<ExecutionTask> tasks,
+                                                                                 List<ExecutionTask> tasksToMarkComplete) {
     if (validateNotNull(tasks, "Tasks to execute cannot be null.").isEmpty()) {
       throw new IllegalArgumentException("Tasks to execute cannot be empty.");
     }
@@ -632,25 +672,40 @@ public final class ExecutionUtils {
                 task.proposal().newReplicas().stream().map(r -> r.brokerId()).collect(Collectors.toList()));
     }
 
-    List<ExecutionTask> safeTasks = filterKafka19148UnsafeTasks(adminClient, tasks);
+    Kafka19148FilterResult filterResult = filterKafka19148UnsafeTasks(adminClient, tasks);
+    List<ExecutionTask> safeTasks = filterResult.getSafeTasks();
+    List<ExecutionTask> completedTasks = filterResult.getCompletedTasks();
+    
+    // If caller wants to know about completed tasks, populate the list
+    if (tasksToMarkComplete != null && !completedTasks.isEmpty()) {
+      tasksToMarkComplete.addAll(completedTasks);
+    }
+    
+    if (!completedTasks.isEmpty()) {
+      LOG.info("KAFKA-19148 EXECUTION-TIME CHECK: {} tasks are already complete (replica ordering mismatch). "
+               + "These will be marked as complete: {}",
+               completedTasks.size(),
+               completedTasks.stream().map(t -> String.format("Task-%d:%s", t.executionId(),
+                   t.proposal().topicPartition())).collect(Collectors.toList()));
+    }
+    
     if (safeTasks.isEmpty()) {
-      LOG.warn("KAFKA-19148 EXECUTION-TIME CHECK: ALL {} tasks were filtered out by safety check. Original tasks: {}. "
-               + "Returning empty result - no tasks will be executed.",
-                tasks.size(), tasks.stream().map(t -> String.format("Task-%d:%s", t.executionId(),
+      LOG.warn("KAFKA-19148 EXECUTION-TIME CHECK: ALL {} tasks were filtered out by safety check. "
+               + "{} marked as complete, {} blocked. Original tasks: {}. "
+               + "Returning empty result - no new tasks will be executed.",
+                tasks.size(), completedTasks.size(), tasks.size() - completedTasks.size(),
+                tasks.stream().map(t -> String.format("Task-%d:%s", t.executionId(),
                     t.proposal().topicPartition())).collect(Collectors.toList()));
       // Return an empty result instead of throwing exception - this allows execution to complete gracefully
       return adminClient.alterPartitionReassignments(Collections.emptyMap());
     }
 
     if (safeTasks.size() < tasks.size()) {
-      LOG.warn("KAFKA-19148 EXECUTION-TIME CHECK: Filtered out {} unsafe tasks out of {} total. Safe tasks: {}, "
-               + "Filtered tasks: {}",
+      LOG.warn("KAFKA-19148 EXECUTION-TIME CHECK: Filtered {} tasks out of {} total. "
+               + "Safe tasks: {}, Completed tasks: {}, Blocked tasks: {}",
                tasks.size() - safeTasks.size(), tasks.size(),
-               safeTasks.stream().map(t -> String.format("Task-%d:%s", t.executionId(),
-                   t.proposal().topicPartition())).collect(Collectors.toList()),
-               tasks.stream().filter(t -> !safeTasks.contains(t))
-                   .map(t -> String.format("Task-%d:%s", t.executionId(),
-                       t.proposal().topicPartition())).collect(Collectors.toList()));
+               safeTasks.size(), completedTasks.size(), 
+               tasks.size() - safeTasks.size() - completedTasks.size());
     } else {
       LOG.debug("KAFKA-19148 EXECUTION-TIME CHECK: All {} tasks passed safety validation", tasks.size());
     }

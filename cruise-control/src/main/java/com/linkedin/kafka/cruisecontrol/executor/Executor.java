@@ -1640,7 +1640,19 @@ public class Executor {
           _executionTaskManager.markTasksInProgress(tasksToExecute);
           LOG.debug("KAFKA-19148 EXECUTION: Submitting {} tasks to ExecutionUtils.submitReplicaReassignmentTasks. "
                    + "Tasks will undergo final KAFKA-19148 safety validation.", tasksToExecute.size());
-          result = ExecutionUtils.submitReplicaReassignmentTasks(_adminClient, tasksToExecute);
+          List<ExecutionTask> tasksToMarkComplete = new ArrayList<>();
+          result = ExecutionUtils.submitReplicaReassignmentTasks(_adminClient, tasksToExecute, tasksToMarkComplete);
+
+          // Mark any tasks that are already complete (replica ordering mismatch)
+          if (!tasksToMarkComplete.isEmpty()) {
+            LOG.info("KAFKA-19148: Marking {} tasks as complete due to replica ordering mismatch",
+                     tasksToMarkComplete.size());
+            for (ExecutionTask task : tasksToMarkComplete) {
+              _executionTaskManager.markTaskDone(task);
+              LOG.debug("KAFKA-19148: Marked task {} for partition {} as complete",
+                        task.executionId(), task.proposal().topicPartition());
+            }
+          }
         }
         // Wait indefinitely for partition movements to finish.
         List<ExecutionTask> completedTasks = waitForInterBrokerReplicaTasksToFinish(result);
@@ -2206,7 +2218,7 @@ public class Executor {
 
         // KAFKA-19148 CRITICAL FIX: Re-validate tasks against current cluster state before re-execution
         List<ExecutionTask> safeTasksForReexecution = validateTasksForKafka19148(tasksToReexecute);
-        
+
         // Mark unsafe tasks as DEAD to prevent infinite re-execution loops
         if (safeTasksForReexecution.size() < tasksToReexecute.size()) {
           Set<ExecutionTask> unsafeTasks = new HashSet<>(tasksToReexecute);
@@ -2222,14 +2234,27 @@ public class Executor {
           LOG.warn("KAFKA-19148 SAFETY: Marked {} unsafe tasks as DEAD out of {} total re-execution tasks",
                    unsafeTasks.size(), tasksToReexecute.size());
         }
-        
+
         if (safeTasksForReexecution.isEmpty()) {
-          LOG.warn("KAFKA-19148 SAFETY: All {} re-execution tasks were blocked by safety check and marked as DEAD", 
+          LOG.warn("KAFKA-19148 SAFETY: All {} re-execution tasks were blocked by safety check and marked as DEAD",
                    tasksToReexecute.size());
           return;
         }
 
-        AlterPartitionReassignmentsResult result = ExecutionUtils.submitReplicaReassignmentTasks(_adminClient, safeTasksForReexecution);
+        List<ExecutionTask> tasksToMarkComplete = new ArrayList<>();
+        AlterPartitionReassignmentsResult result = ExecutionUtils.submitReplicaReassignmentTasks(_adminClient, safeTasksForReexecution, tasksToMarkComplete);
+        
+        // Mark any tasks that are already complete (replica ordering mismatch)
+        if (!tasksToMarkComplete.isEmpty()) {
+          LOG.info("KAFKA-19148 RE-EXECUTION: Marking {} tasks as complete due to replica ordering mismatch", 
+                   tasksToMarkComplete.size());
+          for (ExecutionTask task : tasksToMarkComplete) {
+            _executionTaskManager.markTaskDone(task);
+            LOG.debug("KAFKA-19148 RE-EXECUTION: Marked task {} for partition {} as complete", 
+                     task.executionId(), task.proposal().topicPartition());
+          }
+        }
+        
         // Process the partition reassignment result.
         Set<TopicPartition> noReassignmentToCancel = new HashSet<>();
         ExecutionUtils.processAlterPartitionReassignmentsResult(result, deleted, dead, noReassignmentToCancel);
