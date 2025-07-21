@@ -297,7 +297,7 @@ public class ExecutionTaskPlanner {
             .filter(replica -> !currentIsr.contains(replica))
             .collect(Collectors.toSet());
 
-        LOG.warn("KAFKA-19148 BLOCKED: Skipping proposal for partition {} - removing current leader {} "
+        LOG.debug("KAFKA-19148 BLOCKED: Skipping proposal for partition {} - removing current leader {} "
                  + "while non-ISR replicas {} would remain in replica set. Current ISR: {}",
                  proposal.topicPartition(), currentLeader, nonIsrReplicas, currentIsr);
         // Would cause unclean election
@@ -311,7 +311,7 @@ public class ExecutionTaskPlanner {
       // Leader not being removed - check if new leader would be in ISR
       if (proposal.newLeader().brokerId() != currentLeader
           && !currentIsr.contains(proposal.newLeader().brokerId())) {
-        LOG.warn("KAFKA-19148 BLOCKED: Skipping proposal for partition {} - new leader {} is not in ISR. "
+        LOG.debug("KAFKA-19148 BLOCKED: Skipping proposal for partition {} - new leader {} is not in ISR. "
                  + "Current leader: {}, current ISR: {}",
                  proposal.topicPartition(), proposal.newLeader().brokerId(), currentLeader, currentIsr);
         // Would cause unclean election

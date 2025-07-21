@@ -186,8 +186,8 @@ public abstract class AbstractGoal implements Goal {
               .filter(id -> !currentIsrIds.contains(id))
               .collect(Collectors.toSet());
 
-          String blockKey = String.format("LEADER_REMOVAL_NON_ISR:%s:%d:non-isr%s",
-                                          topicPartition, currentLeader.id(), nonIsrReplicas);
+          String blockKey = String.format("LEADER_REMOVAL_NON_ISR:%s:%d:isr%s",
+                                          topicPartition, currentLeader.id(), currentIsrIds);
           if (_loggedKafka19148Blocks.add(blockKey)) {
             LOG.warn("KAFKA-19148 BLOCKED: Skipping movement for partition {} - removing current leader {} "
                      + "while non-ISR replicas {} would remain in replica set. Current ISR: {}",
