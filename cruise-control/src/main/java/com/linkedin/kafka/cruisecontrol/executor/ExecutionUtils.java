@@ -33,6 +33,7 @@ import javax.annotation.Nullable;
 import org.apache.kafka.clients.CommonClientConfigs;
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.AlterPartitionReassignmentsResult;
+import org.apache.kafka.clients.admin.DescribeClusterResult;
 import org.apache.kafka.clients.admin.DescribeReplicaLogDirsResult;
 import org.apache.kafka.clients.admin.DescribeTopicsResult;
 import org.apache.kafka.clients.admin.ElectLeadersResult;
@@ -444,25 +445,26 @@ public final class ExecutionUtils {
    * Result of filtering tasks for KAFKA-19148 safety.
    */
   static class Kafka19148FilterResult {
-    private final List<ExecutionTask> safeTasks;
-    private final List<ExecutionTask> completedTasks;
+    private final List<ExecutionTask> _safeTasks;
+    private final List<ExecutionTask> _completedTasks;
 
     Kafka19148FilterResult(List<ExecutionTask> safeTasks, List<ExecutionTask> completedTasks) {
-      this.safeTasks = safeTasks;
-      this.completedTasks = completedTasks;
+      this._safeTasks = safeTasks;
+      this._completedTasks = completedTasks;
     }
 
     List<ExecutionTask> getSafeTasks() {
-      return safeTasks;
+      return _safeTasks;
     }
 
     List<ExecutionTask> getCompletedTasks() {
-      return completedTasks;
+      return _completedTasks;
     }
   }
 
   /**
    * Filters out KAFKA-19148 unsafe tasks from the given list of tasks.
+   * Also validates that the filtered tasks don't violate hard goals, particularly rack awareness.
    *
    * @param adminClient The admin client to use for fetching cluster metadata.
    * @param tasks The list of tasks to filter.
@@ -476,6 +478,7 @@ public final class ExecutionUtils {
 
     List<ExecutionTask> safeTasks = new ArrayList<>();
     List<ExecutionTask> completedTasks = new ArrayList<>();
+    Map<String, TopicDescription> topicDescriptions = null;
 
     try {
       // Get current cluster metadata for all topics involved
@@ -487,17 +490,16 @@ public final class ExecutionUtils {
                 topicsToCheck.size(), topicsToCheck);
 
       DescribeTopicsResult describeResult = adminClient.describeTopics(topicsToCheck);
-      Map<String, TopicDescription> topicDescriptions = describeResult.all().get(30, TimeUnit.SECONDS);
+      topicDescriptions = describeResult.all().get(30, TimeUnit.SECONDS);
 
-      LOG.debug("KAFKA-19148 check: Successfully retrieved metadata for {} topics",
-                topicDescriptions.size());
+      LOG.debug("KAFKA-19148 check: Successfully retrieved topic metadata");
 
       for (ExecutionTask task : tasks) {
         TopicPartition tp = task.proposal().topicPartition();
         TopicDescription topicDesc = topicDescriptions.get(tp.topic());
 
         if (topicDesc == null) {
-          LOG.warn("KAFKA-19148 check: Topic {} not found in metadata, skipping task {}",
+          LOG.debug("KAFKA-19148 check: Topic {} not found in metadata, skipping task {}",
                    tp.topic(), task.executionId());
           continue;
         }
@@ -509,14 +511,14 @@ public final class ExecutionUtils {
             .orElse(null);
 
         if (partitionInfo == null) {
-          LOG.warn("KAFKA-19148 check: Partition {} not found in topic metadata, skipping task {}",
+          LOG.debug("KAFKA-19148 check: Partition {} not found in topic metadata, skipping task {}",
                    tp, task.executionId());
           continue;
         }
 
         Node currentLeader = partitionInfo.leader();
         if (currentLeader == null) {
-          LOG.warn("KAFKA-19148 check: Partition {} has no leader, skipping task {}",
+          LOG.debug("KAFKA-19148 check: Partition {} has no leader, skipping task {}",
                    tp, task.executionId());
           continue;
         }
@@ -560,7 +562,7 @@ public final class ExecutionUtils {
                 .filter(id -> !currentIsrIds.contains(id))
                 .collect(Collectors.toSet());
 
-            LOG.warn("KAFKA-19148 EXECUTION-TIME BLOCKED: Skipping task {} for partition {} - removing current leader {} "
+            LOG.debug("KAFKA-19148 EXECUTION-TIME BLOCKED: Skipping task {} for partition {} - removing current leader {} "
                      + "while proposed replicas {} are not in ISR. Current ISR: {}. This could lead to unclean leader election.",
                      task.executionId(), tp, currentLeader.id(), nonIsrReplicas, currentIsrIds);
             // Skip this unsafe task
@@ -596,7 +598,162 @@ public final class ExecutionUtils {
     LOG.debug("KAFKA-19148 EXECUTION-TIME CHECK: {} of {} tasks passed safety validation, {} marked as complete",
               safeTasks.size(), tasks.size(), completedTasks.size());
 
+    // Additional validation: Ensure filtered tasks don't violate rack awareness
+    // Only remove tasks that would actually cause rack awareness violations
+    // Note: topicDescriptions will be empty if we caught an exception above
+    safeTasks = validateRackAwarenessForFilteredTasks(adminClient, safeTasks, tasks,
+                                                      topicDescriptions != null ? topicDescriptions : new HashMap<>());
+
     return new Kafka19148FilterResult(safeTasks, completedTasks);
+  }
+
+  /**
+   * Validates that the filtered tasks don't violate rack awareness constraints.
+   * This prevents scenarios where blocking some tasks causes remaining tasks to place
+   * multiple replicas of the same partition in the same rack/zone.
+   *
+   * @param adminClient The admin client to use for fetching rack information.
+   * @param safeTasks The tasks that passed KAFKA-19148 safety checks.
+   * @param allTasks All tasks that were originally submitted.
+   * @param topicDescriptions Topic metadata containing current replica assignments.
+   * @return List of tasks that are safe to execute without violating rack awareness.
+   */
+  private static List<ExecutionTask> validateRackAwarenessForFilteredTasks(AdminClient adminClient,
+                                                                           List<ExecutionTask> safeTasks,
+                                                                           List<ExecutionTask> allTasks,
+                                                                           Map<String, TopicDescription> topicDescriptions) {
+    if (safeTasks.isEmpty() || safeTasks.size() == allTasks.size()) {
+      // Nothing to validate if no tasks were filtered or all tasks are safe
+      return safeTasks;
+    }
+
+    try {
+      // Get broker rack information
+      DescribeClusterResult clusterResult = adminClient.describeCluster();
+      Collection<Node> nodes = clusterResult.nodes().get(30, TimeUnit.SECONDS);
+
+      // Build broker ID to rack mapping
+      Map<Integer, String> brokerRacks = new HashMap<>();
+      for (Node node : nodes) {
+        if (node.rack() != null) {
+          brokerRacks.put(node.id(), node.rack());
+        }
+      }
+
+      // If no rack information available, can't validate rack awareness
+      if (brokerRacks.isEmpty()) {
+        LOG.debug("No rack information available, skipping rack awareness validation");
+        return safeTasks;
+      }
+
+      // Group tasks by partition
+      Map<TopicPartition, List<ExecutionTask>> allTasksByPartition = allTasks.stream()
+          .collect(Collectors.groupingBy(task -> task.proposal().topicPartition()));
+
+      Map<TopicPartition, List<ExecutionTask>> safeTasksByPartition = safeTasks.stream()
+          .collect(Collectors.groupingBy(task -> task.proposal().topicPartition()));
+
+      List<ExecutionTask> finalSafeTasks = new ArrayList<>();
+
+      // Check each partition's tasks
+      for (Map.Entry<TopicPartition, List<ExecutionTask>> entry : safeTasksByPartition.entrySet()) {
+        TopicPartition tp = entry.getKey();
+        List<ExecutionTask> partitionSafeTasks = entry.getValue();
+        List<ExecutionTask> partitionAllTasks = allTasksByPartition.get(tp);
+
+        // Get current replica placement
+        TopicDescription topicDesc = topicDescriptions.get(tp.topic());
+        if (topicDesc == null) {
+          continue;
+        }
+
+        TopicPartitionInfo partitionInfo = topicDesc.partitions().stream()
+            .filter(p -> p.partition() == tp.partition())
+            .findFirst()
+            .orElse(null);
+
+        if (partitionInfo == null) {
+          continue;
+        }
+
+        // Calculate the final replica placement after applying only the safe tasks
+        Map<Integer, String> finalReplicaRacks = calculateFinalReplicaRacks(
+            partitionInfo, partitionSafeTasks, partitionAllTasks, brokerRacks);
+
+        // Check if final placement violates rack awareness
+        if (violatesRackAwareness(finalReplicaRacks)) {
+          LOG.warn("RACK AWARENESS VIOLATION: Partition {} would have multiple replicas in the same rack after "
+                   + "applying filtered tasks. Blocking all {} tasks for this partition. Final rack distribution: {}",
+                   tp, partitionSafeTasks.size(), finalReplicaRacks);
+          // Don't add these tasks to finalSafeTasks
+        } else {
+          finalSafeTasks.addAll(partitionSafeTasks);
+        }
+      }
+
+      if (finalSafeTasks.size() < safeTasks.size()) {
+        LOG.info("RACK AWARENESS VALIDATION: Removed {} tasks that would violate rack awareness. "
+                 + "Final safe tasks: {} out of {} originally safe tasks",
+                 safeTasks.size() - finalSafeTasks.size(), finalSafeTasks.size(), safeTasks.size());
+      }
+
+      return finalSafeTasks;
+
+    } catch (Exception e) {
+      LOG.warn("Failed to validate rack awareness for filtered tasks. Being conservative and blocking all tasks. Error: ",
+                e);
+      return Collections.emptyList();
+    }
+  }
+
+  /**
+   * Calculates the final rack distribution after applying the safe tasks.
+   *
+   * @param currentPartitionInfo Current partition information.
+   * @param safeTasks Tasks that passed KAFKA-19148 safety checks.
+   * @param allTasks All tasks that were originally submitted.
+   * @param brokerRacks Mapping of broker IDs to rack names.
+   * @return Map of broker ID to rack name for the final replica placement.
+   */
+  private static Map<Integer, String> calculateFinalReplicaRacks(TopicPartitionInfo currentPartitionInfo,
+                                                                 List<ExecutionTask> safeTasks,
+                                                                 List<ExecutionTask> allTasks,
+                                                                 Map<Integer, String> brokerRacks) {
+    // Start with current replica placement
+    Map<Integer, String> replicaRacks = new HashMap<>();
+    for (Node replica : currentPartitionInfo.replicas()) {
+      String rack = brokerRacks.get(replica.id());
+      if (rack != null) {
+        replicaRacks.put(replica.id(), rack);
+      }
+    }
+
+    // Apply the safe tasks to see the final state
+    for (ExecutionTask task : safeTasks) {
+      for (ReplicaPlacementInfo oldReplica : task.proposal().oldReplicas()) {
+        replicaRacks.remove(oldReplica.brokerId());
+      }
+
+      for (ReplicaPlacementInfo newReplica : task.proposal().newReplicas()) {
+        String rack = brokerRacks.get(newReplica.brokerId());
+        if (rack != null) {
+          replicaRacks.put(newReplica.brokerId(), rack);
+        }
+      }
+    }
+
+    return replicaRacks;
+  }
+
+  /**
+   * Checks if the given rack distribution violates rack awareness.
+   *
+   * @param replicaRacks Map of broker ID to rack name for replica placement.
+   * @return true if rack awareness is violated (multiple replicas in same rack), false otherwise.
+   */
+  private static boolean violatesRackAwareness(Map<Integer, String> replicaRacks) {
+    Set<String> uniqueRacks = new HashSet<>(replicaRacks.values());
+    return uniqueRacks.size() < replicaRacks.size();
   }
 
   /**
@@ -677,12 +834,12 @@ public final class ExecutionUtils {
     Kafka19148FilterResult filterResult = filterKafka19148UnsafeTasks(adminClient, tasks);
     List<ExecutionTask> safeTasks = filterResult.getSafeTasks();
     List<ExecutionTask> completedTasks = filterResult.getCompletedTasks();
-    
+
     // If caller wants to know about completed tasks, populate the list
     if (tasksToMarkComplete != null && !completedTasks.isEmpty()) {
       tasksToMarkComplete.addAll(completedTasks);
     }
-    
+
     if (!completedTasks.isEmpty()) {
       LOG.info("KAFKA-19148 EXECUTION-TIME CHECK: {} tasks are already complete (replica ordering mismatch). "
                + "These will be marked as complete: {}",
@@ -690,13 +847,13 @@ public final class ExecutionUtils {
                completedTasks.stream().map(t -> String.format("Task-%d:%s", t.executionId(),
                    t.proposal().topicPartition())).collect(Collectors.toList()));
     }
-    
+
     // Identify unsafe tasks that should be marked as DEAD
     if (safeTasks.size() < tasks.size() || !completedTasks.isEmpty()) {
       Set<ExecutionTask> unsafeTasks = new HashSet<>(tasks);
       unsafeTasks.removeAll(safeTasks);
-      unsafeTasks.removeAll(completedTasks); // Don't mark completed ones as DEAD
-      
+      unsafeTasks.removeAll(completedTasks);
+
       if (!unsafeTasks.isEmpty() && tasksToMarkDead != null) {
         tasksToMarkDead.addAll(unsafeTasks);
         LOG.info("KAFKA-19148 EXECUTION-TIME CHECK: {} tasks are unsafe (would cause unclean leader election). "
@@ -706,7 +863,7 @@ public final class ExecutionUtils {
                      t.proposal().topicPartition())).collect(Collectors.toList()));
       }
     }
-    
+
     if (safeTasks.isEmpty()) {
       LOG.warn("KAFKA-19148 EXECUTION-TIME CHECK: ALL {} tasks were filtered out by safety check. "
                + "{} marked as complete, {} marked as dead. Original tasks: {}. "
@@ -722,7 +879,7 @@ public final class ExecutionUtils {
       LOG.warn("KAFKA-19148 EXECUTION-TIME CHECK: Filtered {} tasks out of {} total. "
                + "Safe tasks: {}, Completed tasks: {}, Blocked tasks: {}",
                tasks.size() - safeTasks.size(), tasks.size(),
-               safeTasks.size(), completedTasks.size(), 
+               safeTasks.size(), completedTasks.size(),
                tasks.size() - safeTasks.size() - completedTasks.size());
     } else {
       LOG.debug("KAFKA-19148 EXECUTION-TIME CHECK: All {} tasks passed safety validation", tasks.size());

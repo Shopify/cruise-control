@@ -2255,7 +2255,10 @@ public class Executor {
 
         List<ExecutionTask> tasksToMarkComplete = new ArrayList<>();
         // Note: We don't need tasksToMarkDead here because unsafe tasks are already marked as DEAD above
-        AlterPartitionReassignmentsResult result = ExecutionUtils.submitReplicaReassignmentTasks(_adminClient, safeTasksForReexecution, tasksToMarkComplete, null);
+        AlterPartitionReassignmentsResult result = ExecutionUtils.submitReplicaReassignmentTasks(_adminClient, 
+                                                                                                  safeTasksForReexecution, 
+                                                                                                  tasksToMarkComplete, 
+                                                                                                  null);
         
         // Mark any tasks that are already complete (replica ordering mismatch)
         if (!tasksToMarkComplete.isEmpty()) {
