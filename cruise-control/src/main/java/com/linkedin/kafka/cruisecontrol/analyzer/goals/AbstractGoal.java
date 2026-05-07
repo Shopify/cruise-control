@@ -21,13 +21,19 @@ import com.linkedin.kafka.cruisecontrol.model.ClusterModel;
 import com.linkedin.kafka.cruisecontrol.model.ClusterModelStats;
 import com.linkedin.kafka.cruisecontrol.model.Disk;
 import com.linkedin.kafka.cruisecontrol.model.Replica;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.SortedSet;
+import org.apache.kafka.common.Cluster;
+import org.apache.kafka.common.Node;
+import org.apache.kafka.common.PartitionInfo;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import java.util.Collection;
 import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.HashSet;
 
 import static com.linkedin.kafka.cruisecontrol.analyzer.ActionAcceptance.ACCEPT;
 import static com.linkedin.kafka.cruisecontrol.analyzer.ActionAcceptance.BROKER_REJECT;
@@ -50,6 +56,11 @@ public abstract class AbstractGoal implements Goal {
   protected int _numWindows;
   protected double _minMonitoredPartitionPercentage;
   protected ProvisionResponse _provisionResponse;
+  protected Cluster _kafkaCluster;
+  // Track which KAFKA-19148 blocks have been logged to avoid spammy logs
+  private final Set<String> _loggedKafka19148Blocks = new HashSet<>();
+  // Track blocked proposals that should be marked as DEAD
+  private final Set<BalancingAction> _kafka19148BlockedProposals = new HashSet<>();
 
   /**
    * Constructor of Abstract Goal class sets the
@@ -71,6 +82,191 @@ public abstract class AbstractGoal implements Goal {
     _balancingConstraint = new BalancingConstraint(parsedConfig);
     _numWindows = parsedConfig.getInt(MonitorConfig.NUM_PARTITION_METRICS_WINDOWS_CONFIG);
     _minMonitoredPartitionPercentage = parsedConfig.getDouble(MonitorConfig.MIN_VALID_PARTITION_RATIO_CONFIG);
+  }
+
+  /**
+   * Set the Kafka cluster metadata for ISR safety checks.
+   *
+   * @param kafkaCluster The Kafka cluster metadata.
+   */
+  public void setKafkaCluster(Cluster kafkaCluster) {
+    _kafkaCluster = kafkaCluster;
+    // Clear logged blocks when cluster metadata is refreshed for a new optimization run
+    _loggedKafka19148Blocks.clear();
+    _kafka19148BlockedProposals.clear();
+  }
+
+  /**
+   * Get the set of proposals that were blocked due to KAFKA-19148 safety checks.
+   * These proposals should be marked as DEAD to prevent infinite re-execution loops.
+   *
+   * @return The set of blocked proposals.
+   */
+  public Set<BalancingAction> getKafka19148BlockedProposals() {
+    return new HashSet<>(_kafka19148BlockedProposals);
+  }
+
+  /**
+   * Safety check for KAFKA-19148: Prevent replica movements that could trigger unclean leader elections
+   * in KRaft mode. The issue occurs when removing the current leader from the replica set while
+   * there are non-ISR replicas in the remaining set.
+   *
+   * @param clusterModel The cluster model.
+   * @param replica The replica being moved.
+   * @param destinationBroker The destination broker for the move.
+   * @param action The type of action being performed.
+   * @param proposal The balancing proposal being checked (can be null).
+   * @return true if the move is safe to proceed, false if it should be skipped.
+   */
+  private boolean isReplicaMoveSafeForKRaft(ClusterModel clusterModel,
+                                           Replica replica,
+                                           Broker destinationBroker,
+                                           ActionType action,
+                                           BalancingAction proposal) {
+    // Only check inter-broker movements that could affect ISR
+    if (_kafkaCluster == null
+        || (action != ActionType.INTER_BROKER_REPLICA_MOVEMENT
+            && action != ActionType.INTER_BROKER_REPLICA_SWAP)) {
+      return true;
+    }
+
+    org.apache.kafka.common.TopicPartition topicPartition = replica.topicPartition();
+
+    try {
+      PartitionInfo partitionInfo = _kafkaCluster.partition(topicPartition);
+      if (partitionInfo == null) {
+        String blockKey = String.format("NO_METADATA:%s", topicPartition);
+        if (_loggedKafka19148Blocks.add(blockKey)) {
+          LOG.debug("KAFKA-19148 check: Partition {} does not exist in Kafka metadata, skipping move", topicPartition);
+        }
+        // Track this blocked proposal
+        if (proposal != null) {
+          _kafka19148BlockedProposals.add(proposal);
+        }
+        return false;
+      }
+
+      // Get current state from Kafka metadata
+      Node currentLeader = partitionInfo.leader();
+      if (currentLeader == null) {
+        LOG.debug("KAFKA-19148 check: Partition {} has no leader, allowing move", topicPartition);
+        return true;
+      }
+
+      Set<Integer> currentReplicaIds = Arrays.stream(partitionInfo.replicas())
+          .mapToInt(Node::id)
+          .boxed()
+          .collect(Collectors.toSet());
+      Set<Integer> currentIsrIds = Arrays.stream(partitionInfo.inSyncReplicas())
+          .mapToInt(Node::id)
+          .boxed()
+          .collect(Collectors.toSet());
+
+      // Check if any current replicas are on dead brokers
+      boolean hasDeadReplicas = currentReplicaIds.stream()
+          .anyMatch(brokerId -> {
+            Broker broker = clusterModel.broker(brokerId);
+            return broker == null || !broker.isAlive();
+          });
+
+      if (hasDeadReplicas) {
+        LOG.debug("KAFKA-19148 check: Partition {} has dead replicas, allowing move for recovery", topicPartition);
+        return true;
+      }
+
+      // Log current state for debugging
+      LOG.debug("KAFKA-19148 check for {}: current leader={}, replicas={}, ISR={}, "
+                + "moving replica from broker {} to broker {}",
+                topicPartition, currentLeader.id(), currentReplicaIds, currentIsrIds,
+                replica.broker().id(), destinationBroker.id());
+
+      // Check if we're moving the current leader
+      boolean movingCurrentLeader = currentLeader.id() == replica.broker().id();
+      if (!movingCurrentLeader) {
+        LOG.debug("KAFKA-19148 check: Not moving current leader for {}, move is safe", topicPartition);
+        return true;
+      }
+
+      // Special case: Single-replica partitions
+      if (currentReplicaIds.size() == 1) {
+        // Moving a single-replica partition means removing the current leader with no other replicas
+        // This is exactly the KAFKA-19148 scenario we need to prevent
+        String blockKey = String.format("SINGLE_REPLICA:%s:%d->%d", topicPartition, currentLeader.id(), destinationBroker.id());
+        if (_loggedKafka19148Blocks.add(blockKey)) {
+          LOG.debug("KAFKA-19148 BLOCKED: Cannot move single-replica partition {} - would remove current leader {} "
+                   + "with no other replicas. Should first add replica to destination broker {}",
+                   topicPartition, currentLeader.id(), destinationBroker.id());
+        }
+
+        if (proposal != null) {
+          _kafka19148BlockedProposals.add(proposal);
+        }
+        return false;
+      }
+
+      // Multi-replica case: determine the new replica set after the move
+      Set<Integer> newReplicaIds = new HashSet<>(currentReplicaIds);
+      // Remove the source broker
+      newReplicaIds.remove(replica.broker().id());
+      // Add the destination broker
+      newReplicaIds.add(destinationBroker.id());
+
+      // Check if the current leader will be removed from the replica set
+      boolean leaderBeingRemoved = !newReplicaIds.contains(currentLeader.id());
+
+      if (leaderBeingRemoved) {
+        // Critical check: When removing the current leader, ALL remaining replicas must be in ISR
+        // to prevent KRaft from electing an out-of-sync replica
+        boolean allNewReplicasInIsr = newReplicaIds.stream().allMatch(currentIsrIds::contains);
+
+        if (!allNewReplicasInIsr) {
+          Set<Integer> nonIsrReplicas = newReplicaIds.stream()
+              .filter(id -> !currentIsrIds.contains(id))
+              .collect(Collectors.toSet());
+
+          String blockKey = String.format("LEADER_REMOVAL_NON_ISR:%s:%d:isr%s",
+                                          topicPartition, currentLeader.id(), currentIsrIds);
+          if (_loggedKafka19148Blocks.add(blockKey)) {
+            LOG.debug("KAFKA-19148 BLOCKED: Skipping movement for partition {} - removing current leader {} "
+                     + "while non-ISR replicas {} would remain in replica set. Current ISR: {}",
+                     topicPartition, currentLeader.id(), nonIsrReplicas, currentIsrIds);
+          }
+          // Track this blocked proposal
+          if (proposal != null) {
+            _kafka19148BlockedProposals.add(proposal);
+          }
+          return false;
+        }
+
+        LOG.debug("KAFKA-19148 check: Leader removal for {} is safe - all remaining replicas {} are in ISR {}",
+                  topicPartition, newReplicaIds, currentIsrIds);
+      } else {
+        // Moving leader within the replica set - check if destination is in ISR
+        if (!currentIsrIds.contains(destinationBroker.id())) {
+          String blockKey = String.format("LEADER_TO_NON_ISR:%s:%d->%d",
+                                          topicPartition, currentLeader.id(), destinationBroker.id());
+          if (_loggedKafka19148Blocks.add(blockKey)) {
+            LOG.debug("KAFKA-19148 BLOCKED: Skipping movement for partition {} - moving leader {} to "
+                     + "out-of-sync broker {}. Current ISR: {}",
+                     topicPartition, currentLeader.id(), destinationBroker.id(), currentIsrIds);
+          }
+
+          if (proposal != null) {
+            _kafka19148BlockedProposals.add(proposal);
+          }
+          return false;
+        }
+
+        LOG.debug("KAFKA-19148 check: Leader movement for {} is safe - destination {} is in ISR",
+                  topicPartition, destinationBroker.id());
+      }
+
+    } catch (Exception e) {
+      LOG.warn("KAFKA-19148 check: Error checking partition {}, skipping move for safety", topicPartition, e);
+      return false;
+    }
+
+    return true;
   }
 
   private static boolean hasExcludedBrokersForReplicaMoveWithReplicas(ClusterModel clusterModel, OptimizationOptions optimizationOptions) {
@@ -105,6 +301,11 @@ public abstract class AbstractGoal implements Goal {
       LOG.trace("[POST - {}] {}", name(), statsAfterOptimization);
       if (LOG.isDebugEnabled()) {
         LOG.debug("Finished optimization for {} in {}ms.", name(), System.currentTimeMillis() - goalStartTime);
+      }
+      // Log KAFKA-19148 block summary if any movements were blocked
+      if (!_loggedKafka19148Blocks.isEmpty()) {
+        LOG.info("KAFKA-19148 summary for goal {}: {} unique movements were blocked to prevent unclean leader elections",
+                 name(), _loggedKafka19148Blocks.size());
       }
       LOG.trace("Cluster after optimization is {}", clusterModel);
       // The optimization cannot make stats worse unless the cluster has (1) broken brokers or (2) excluded brokers for replica move with replicas.
@@ -252,20 +453,36 @@ public abstract class AbstractGoal implements Goal {
         continue;
       }
 
+      // KAFKA-19148 safety check: Prevent replica movements that could trigger unclean leader elections
+      if (!isReplicaMoveSafeForKRaft(clusterModel, replica, broker, action, proposal)) {
+        LOG.trace("Skipping replica move for {} to prevent KAFKA-19148.", proposal);
+        continue;
+      }
+
       if (!selfSatisfied(clusterModel, proposal)) {
         LOG.trace("Unable to self-satisfy proposal {}.", proposal);
         continue;
       }
 
       ActionAcceptance acceptance = AnalyzerUtils.isProposalAcceptableForOptimizedGoals(optimizedGoals, proposal, clusterModel);
-      LOG.trace("Trying to apply legit and self-satisfied action {}, actionAcceptance = {}", proposal, acceptance);
+      LOG.trace("Trying to apply legit and self-satisfied action {} for {}, actionAcceptance = {}",
+                proposal, replica.topicPartition(), acceptance);
       if (acceptance == ACCEPT) {
+        // Log when we're applying the move
+        if (action == ActionType.INTER_BROKER_REPLICA_MOVEMENT
+            || action == ActionType.INTER_BROKER_REPLICA_SWAP
+            || action == ActionType.LEADERSHIP_MOVEMENT) {
+          LOG.debug("Applying {} for partition {}: moving replica from broker {} to broker {}",
+                    action, replica.topicPartition(), replica.broker().id(), broker.id());
+        }
         if (action == ActionType.LEADERSHIP_MOVEMENT) {
           clusterModel.relocateLeadership(replica.topicPartition(), replica.broker().id(), broker.id());
         } else if (action == ActionType.INTER_BROKER_REPLICA_MOVEMENT) {
           clusterModel.relocateReplica(replica.topicPartition(), replica.broker().id(), broker.id());
         }
         return broker;
+      } else if (acceptance == BROKER_REJECT) {
+        LOG.trace("Broker rejected for {}: {}", replica.topicPartition(), proposal);
       }
     }
     return null;
@@ -312,6 +529,17 @@ public abstract class AbstractGoal implements Goal {
 
       if (!legitMove(destinationReplica, sourceReplica.broker(), clusterModel, ActionType.INTER_BROKER_REPLICA_MOVEMENT)) {
         LOG.trace("Swap from destination to source broker is not legit for {}.", swapProposal);
+        continue;
+      }
+
+      // KAFKA-19148 safety check for both replicas involved in the swap
+      if (!isReplicaMoveSafeForKRaft(clusterModel, sourceReplica, destinationBroker, ActionType.INTER_BROKER_REPLICA_SWAP, swapProposal)) {
+        LOG.trace("Skipping swap to prevent KAFKA-19148 for source replica in {}.", swapProposal);
+        continue;
+      }
+
+      if (!isReplicaMoveSafeForKRaft(clusterModel, destinationReplica, sourceReplica.broker(), ActionType.INTER_BROKER_REPLICA_SWAP, swapProposal)) {
+        LOG.trace("Skipping swap to prevent KAFKA-19148 for destination replica in {}.", swapProposal);
         continue;
       }
 

@@ -13,6 +13,7 @@ import com.linkedin.kafka.cruisecontrol.executor.strategy.ReplicaMovementStrateg
 import com.linkedin.kafka.cruisecontrol.executor.strategy.StrategyOptions;
 import com.linkedin.kafka.cruisecontrol.model.ReplicaPlacementInfo;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
@@ -190,6 +191,35 @@ public class ExecutionTaskPlanner {
         LOG.trace("Ignored the attempt to move non-existing partition for topic partition: {}", tp);
         continue;
       }
+
+      // Log current state vs proposal for debugging
+      if (LOG.isDebugEnabled()) {
+        Set<Integer> currentReplicas = Arrays.stream(partitionInfo.replicas()).map(Node::id).collect(Collectors.toSet());
+        Set<Integer> currentIsr = Arrays.stream(partitionInfo.inSyncReplicas()).map(Node::id).collect(Collectors.toSet());
+        Set<Integer> proposedReplicas = proposal.newReplicas().stream()
+            .map(ReplicaPlacementInfo::brokerId)
+            .collect(Collectors.toSet());
+
+        LOG.debug("Evaluating proposal for partition {}: current replicas={}, ISR={}, leader={}, "
+                  + "proposal: {} -> {}, oldLeader={}, newLeader={}",
+                  tp, currentReplicas, currentIsr,
+                  partitionInfo.leader() != null ? partitionInfo.leader().id() : "null",
+                  proposal.oldReplicas().stream().map(ReplicaPlacementInfo::brokerId).collect(Collectors.toList()),
+                  proposedReplicas,
+                  proposal.oldLeader().brokerId(),
+                  proposal.newLeader().brokerId());
+      }
+
+      // KAFKA-19148 validation: Check if the proposal would cause unclean leader election
+      if (wouldCauseUncleanLeaderElection(proposal, partitionInfo)) {
+        LOG.warn("Skipping proposal for partition {} to prevent KAFKA-19148: moving leader {} to broker {} "
+                 + "which would cause unclean election. Current replicas: {}, ISR: {}",
+                 tp, proposal.oldLeader().brokerId(), proposal.newLeader().brokerId(),
+                 Arrays.stream(partitionInfo.replicas()).map(Node::id).collect(Collectors.toList()),
+                 Arrays.stream(partitionInfo.inSyncReplicas()).map(Node::id).collect(Collectors.toList()));
+        continue;
+      }
+
       if (!proposal.isInterBrokerMovementCompleted(partitionInfo)) {
         long replicaActionExecutionId = _executionId++;
         long executionAlertingThresholdMs = Math.max(Math.round(proposal.dataToMoveInMB() / _interBrokerReplicaMovementRateAlertingThreshold * 1000),
@@ -197,6 +227,16 @@ public class ExecutionTaskPlanner {
         ExecutionTask executionTask = new ExecutionTask(replicaActionExecutionId, proposal, INTER_BROKER_REPLICA_ACTION,
                                                         executionAlertingThresholdMs);
         _remainingInterBrokerReplicaMovements.add(executionTask);
+        LOG.debug("KAFKA-19148 TASK CREATION: Created INTER_BROKER_REPLICA_ACTION task {} for partition {} with proposal: {} -> {}, "
+                  + "oldLeader={}, newLeader={}, current cluster state - leader={}, ISR={}, replicas={}",
+                  replicaActionExecutionId, proposal.topicPartition(),
+                  proposal.oldReplicas().stream().map(ReplicaPlacementInfo::brokerId).collect(Collectors.toList()),
+                  proposal.newReplicas().stream().map(ReplicaPlacementInfo::brokerId).collect(Collectors.toList()),
+                  proposal.oldLeader().brokerId(),
+                  proposal.newLeader().brokerId(),
+                  partitionInfo.leader() != null ? partitionInfo.leader().id() : "null",
+                  Arrays.stream(partitionInfo.inSyncReplicas()).map(Node::id).collect(Collectors.toList()),
+                  Arrays.stream(partitionInfo.replicas()).map(Node::id).collect(Collectors.toList()));
         LOG.trace("Added action {} as replica proposal {}", replicaActionExecutionId, proposal);
       }
     }
@@ -206,6 +246,84 @@ public class ExecutionTaskPlanner {
                                                                 : replicaMovementStrategy.chainBaseReplicaMovementStrategyIfAbsent();
     _interPartMoveTasksByBrokerId = chosenReplicaMovementTaskStrategy.applyStrategy(_remainingInterBrokerReplicaMovements, strategyOptions);
     _interPartMoveBrokerComparator = brokerComparator(strategyOptions, chosenReplicaMovementTaskStrategy);
+  }
+
+  /**
+   * Check if executing this proposal would cause an unclean leader election (KAFKA-19148).
+   * In KRaft mode, when the current leader is removed from the replica set, Kafka might
+   * elect a non-ISR replica as leader even when ISR members are available in the new set.
+   *
+   * To prevent this, we skip any proposal that:
+   * 1. Removes the current leader from the replica set AND
+   * 2. Has ANY non-ISR replicas in the new replica set
+   *
+   * @param proposal The execution proposal to check
+   * @param partitionInfo Current partition state from Kafka cluster
+   * @return true if this proposal would cause unclean leader election, false otherwise
+   */
+  private boolean wouldCauseUncleanLeaderElection(ExecutionProposal proposal, PartitionInfo partitionInfo) {
+    // Get current leader
+    if (partitionInfo.leader() == null) {
+      LOG.debug("KAFKA-19148 check: Partition {} has no leader, allowing proposal",
+                proposal.topicPartition());
+      return false;
+    }
+    int currentLeader = partitionInfo.leader().id();
+
+    // Get current ISR
+    Set<Integer> currentIsr = Arrays.stream(partitionInfo.inSyncReplicas())
+        .map(Node::id)
+        .collect(Collectors.toSet());
+
+    // Get proposed replica set
+    Set<Integer> proposedReplicas = proposal.newReplicas().stream()
+        .map(ReplicaPlacementInfo::brokerId)
+        .collect(Collectors.toSet());
+
+    // Log the check details
+    LOG.debug("KAFKA-19148 check for partition {}: current leader={}, current ISR={}, "
+              + "proposed replicas={}, old replicas={}",
+              proposal.topicPartition(), currentLeader, currentIsr, proposedReplicas,
+              proposal.oldReplicas().stream().map(ReplicaPlacementInfo::brokerId).collect(Collectors.toList()));
+
+    // Check if current leader is being removed from replica set
+    if (!proposedReplicas.contains(currentLeader)) {
+      // Current leader being removed - check if ALL proposed replicas are in ISR
+      boolean allProposedReplicasInIsr = proposedReplicas.stream().allMatch(currentIsr::contains);
+
+      if (!allProposedReplicasInIsr) {
+        // Find which replicas are not in ISR
+        Set<Integer> nonIsrReplicas = proposedReplicas.stream()
+            .filter(replica -> !currentIsr.contains(replica))
+            .collect(Collectors.toSet());
+
+        LOG.debug("KAFKA-19148 BLOCKED: Skipping proposal for partition {} - removing current leader {} "
+                 + "while non-ISR replicas {} would remain in replica set. Current ISR: {}",
+                 proposal.topicPartition(), currentLeader, nonIsrReplicas, currentIsr);
+        // Would cause unclean election
+        return true;
+      }
+
+      LOG.debug("KAFKA-19148 check: Proposal for partition {} is safe - removing leader {} "
+                + "and all remaining replicas {} are in ISR",
+                proposal.topicPartition(), currentLeader, proposedReplicas);
+    } else {
+      // Leader not being removed - check if new leader would be in ISR
+      if (proposal.newLeader().brokerId() != currentLeader
+          && !currentIsr.contains(proposal.newLeader().brokerId())) {
+        LOG.debug("KAFKA-19148 BLOCKED: Skipping proposal for partition {} - new leader {} is not in ISR. "
+                 + "Current leader: {}, current ISR: {}",
+                 proposal.topicPartition(), proposal.newLeader().brokerId(), currentLeader, currentIsr);
+        // Would cause unclean election
+        return true;
+      }
+
+      LOG.debug("KAFKA-19148 check: Proposal for partition {} is safe - leader remains or new leader is in ISR",
+                proposal.topicPartition());
+    }
+
+    // Safe to proceed
+    return false;
   }
 
   /**
@@ -242,6 +360,8 @@ public class ExecutionTaskPlanner {
             ExecutionTask task = new ExecutionTask(replicaActionExecutionId, proposal, r.brokerId(), INTRA_BROKER_REPLICA_ACTION,
                                                    Math.max(Math.round(proposal.dataToMoveInMB() / _intraBrokerReplicaMovementRateAlertingThreshold),
                                                             _taskExecutionAlertingThresholdMs));
+            LOG.debug("Created INTRA_BROKER_REPLICA_ACTION task {} for partition {} on broker {} moving from {} to {}",
+                      replicaActionExecutionId, proposal.topicPartition(), r.brokerId(), currentLogdir, r.logdir());
             _intraPartMoveTasksByBrokerId.putIfAbsent(r.brokerId(), new TreeSet<>());
             _intraPartMoveTasksByBrokerId.get(r.brokerId()).add(task);
             _remainingIntraBrokerReplicaMovements.add(task);
@@ -259,13 +379,20 @@ public class ExecutionTaskPlanner {
    */
   private void maybeAddLeaderChangeTasks(Collection<ExecutionProposal> proposals, Cluster cluster) {
     for (ExecutionProposal proposal : proposals) {
-      if (proposal.hasLeaderAction()) {
+      // Only create LEADER_ACTION tasks for pure leadership movements (no replica set changes)
+      if (proposal.hasLeaderAction() && !proposal.hasReplicaAction()) {
         Node currentLeader = cluster.leaderFor(proposal.topicPartition());
         if (currentLeader != null && currentLeader.id() != proposal.newLeader().brokerId()) {
           // Get the execution Id for the leader action proposal execution;
           long leaderActionExecutionId = _executionId++;
           ExecutionTask leaderActionTask = new ExecutionTask(leaderActionExecutionId, proposal, LEADER_ACTION, _taskExecutionAlertingThresholdMs);
           _remainingLeadershipMovements.put(leaderActionExecutionId, leaderActionTask);
+          LOG.debug("KAFKA-19148 TASK CREATION: Created LEADER_ACTION task {} for partition {} moving leadership from {} to {}, "
+                    + "current cluster state - leader={}, ISR={}, replicas={}",
+                    leaderActionExecutionId, proposal.topicPartition(), currentLeader.id(), proposal.newLeader().brokerId(),
+                    currentLeader.id(),
+                    Arrays.stream(cluster.partition(proposal.topicPartition()).inSyncReplicas()).map(Node::id).collect(Collectors.toList()),
+                    Arrays.stream(cluster.partition(proposal.topicPartition()).replicas()).map(Node::id).collect(Collectors.toList()));
           LOG.trace("Added action {} as leader proposal {}", leaderActionExecutionId, proposal);
         }
       }
